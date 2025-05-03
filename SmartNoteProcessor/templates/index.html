@@ -43,11 +43,11 @@
                 <form id="upload-form" action="{{ url_for('upload_file') }}" method="POST" enctype="multipart/form-data" class="mb-3">
                     <div class="upload-area mb-3" id="upload-area">
                         <i class="fas fa-cloud-upload-alt text-info fa-3x mb-3"></i>
-                        <h5>Upload Document</h5>
-                        <p class="text-muted">Click or drag and drop your file here</p>
+                        <h5>Upload Document(s)</h5>
+                        <p class="text-muted">Click or drag and drop your file(s) here</p>
                         <p class="text-muted small">Supported formats: TXT, PDF, DOCX, MD</p>
                         <p id="file-info" class="text-info d-none"></p>
-                        <input type="file" id="file-input" name="file" class="file-input" accept=".txt,.pdf,.docx,.md">
+                        <input type="file" id="file-input" name="file" class="file-input" accept=".txt,.pdf,.docx,.md" multiple>
                     </div>
                     
                     <div class="d-grid">
@@ -66,13 +66,21 @@
                     </div>
                     <div class="list-group list-group-flush">
                         {% for document in documents %}
-                        <a href="{{ url_for('load_document', document_id=document.id) }}" class="list-group-item list-group-item-action">
-                            <div class="d-flex w-100 justify-content-between">
-                                <h6 class="mb-1">{{ document.title }}</h6>
-                                <small>{{ document.created_at.strftime('%Y-%m-%d %H:%M') }}</small>
-                            </div>
-                            <small class="text-muted">{{ document.file_type.upper() }} | {{ document.topics|length }} topics</small>
-                        </a>
+                        <div class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+                            <a href="{{ url_for('load_document', document_id=document.id) }}" class="text-decoration-none flex-grow-1 me-3">
+                                <div class="d-flex w-100 justify-content-between">
+                                    <h6 class="mb-1">{{ document.title }}</h6>
+                                    <small>{{ document.created_at.strftime('%Y-%m-%d %H:%M') }}</small>
+                                </div>
+                                <small class="text-muted">{{ document.file_type.upper() }} | {{ document.topics|length }} topics</small>
+                            </a>
+                            <!-- Delete Button Form -->
+                            <form action="{{ url_for('delete_document', document_id=document.id) }}" method="POST" onsubmit="return confirm('Are you sure you want to delete this document and all its associated notes? This action cannot be undone.');" class="ms-2">
+                                <button type="submit" class="btn btn-sm btn-outline-danger">
+                                    <i class="fas fa-trash-alt"></i>
+                                </button>
+                            </form>
+                        </div>
                         {% endfor %}
                     </div>
                 </div>

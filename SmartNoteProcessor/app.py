@@ -134,141 +134,183 @@ def load_document(document_id):
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    if 'file' not in request.files:
-        flash('No file part', 'danger')
-        return redirect(request.url)
-    
-    file = request.files['file']
-    
-    if file.filename == '':
-        flash('No selected file', 'danger')
-        return redirect(request.url)
-    
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        session_id = session.get('session_id')
-        
-        # Create a unique folder for this session's uploads
-        upload_folder = os.path.join(tempfile.gettempdir(), f"smart_notes_{session_id}")
-        if not os.path.exists(upload_folder):
-            os.makedirs(upload_folder)
-        
-        # Make a subfolder for images if it doesn't exist
-        images_folder = os.path.join(upload_folder, "images")
-        if not os.path.exists(images_folder):
-            os.makedirs(images_folder)
-        
-        # Save the file
-        file_path = os.path.join(upload_folder, filename)
-        file.save(file_path)
-        
-        try:
-            # Process document
-            document_content = document_processor.extract_text(file_path, file.filename)
-            
-            # Extract images if it's a PDF file
-            if filename.lower().endswith('.pdf'):
+    uploaded_files = request.files.getlist('file')
+
+    if not uploaded_files or all(f.filename == '' for f in uploaded_files):
+        flash('No selected file(s)', 'danger')
+        return redirect(url_for('index'))
+
+    # Ensure session exists
+    if 'session_id' not in session:
+        session['session_id'] = str(uuid.uuid4())
+        sessions_data[session['session_id']] = {
+            'document_content': '',
+            'topics': {},
+            'current_granularity': 50,
+            'processed_document_ids': [],
+            'document_id': None # Will store the primary document ID
+        }
+    session_id = session['session_id']
+    # Clear previous session data for a new upload batch
+    sessions_data[session_id] = {
+        'document_content': '',
+        'topics': {},
+        'current_granularity': 50,
+        'processed_document_ids': [],
+        'document_id': None
+    }
+
+
+    processed_count = 0
+    error_count = 0
+    combined_content = ""
+    processed_document_ids = []
+    session_upload_base = None # Initialize here
+
+    try:
+        # Create a unique base folder for this session's uploads
+        session_upload_base = os.path.join(tempfile.gettempdir(), f"smart_notes_{session_id}")
+        if os.path.exists(session_upload_base):
+             shutil.rmtree(session_upload_base) # Clean up previous session folder if exists
+        os.makedirs(session_upload_base)
+        images_folder = os.path.join(session_upload_base, "images")
+        os.makedirs(images_folder) # Common images folder for the session
+
+        for file in uploaded_files:
+            if file and allowed_file(file.filename):
+                filename = secure_filename(file.filename)
+                file_path = os.path.join(session_upload_base, filename) # Save directly in session folder
+                file.save(file_path)
+                logger.info(f"Processing file: {filename}")
+
                 try:
-                    # Import PDF specific libraries here
-                    from pdfminer.high_level import extract_text as pdf_extract
-                    from pdfminer.layout import LAParams
-                    import fitz  # PyMuPDF
-                    
-                    # Extract images from PDF using PyMuPDF
-                    pdf_document = fitz.open(file_path)
-                    
-                    # Iterate through pages and extract images
-                    image_count = 0
-                    for page_num in range(len(pdf_document)):
-                        page = pdf_document[page_num]
-                        image_list = page.get_images(full=True)
-                        
-                        for img_index, img in enumerate(image_list):
-                            xref = img[0]
-                            base_image = pdf_document.extract_image(xref)
-                            image_bytes = base_image["image"]
-                            
-                            # Determine file extension based on image type
-                            image_ext = base_image["ext"]
-                            image_filename = f"page{page_num+1}_img{img_index+1}.{image_ext}"
-                            
-                            with open(os.path.join(images_folder, image_filename), "wb") as img_file:
-                                img_file.write(image_bytes)
-                                image_count += 1
-                    
-                    logger.info(f"Extracted {image_count} images from the PDF")
-                    
-                except ImportError as ie:
-                    logger.warning(f"PDF image extraction skipped: {str(ie)}")
-                except Exception as pdf_err:
-                    logger.error(f"Error extracting images from PDF: {str(pdf_err)}")
-            
-            # Ensure session ID exists in sessions_data dictionary
-            if session_id not in sessions_data:
-                sessions_data[session_id] = {
-                    'document_content': '',
-                    'topics': {},
-                    'current_granularity': 50
-                }
-            
-            # Store in session data for temporary use
-            sessions_data[session_id]['document_content'] = document_content
-            sessions_data[session_id]['upload_folder'] = upload_folder
-            
-            # Extract topics with default granularity
-            granularity = 50  # Default granularity
-            topics_dict = topic_extractor.extract_topics(document_content, granularity)
+                    # 1. Extract text
+                    current_content = document_processor.extract_text(file_path, filename)
+                    combined_content += f"\n\n--- START DOCUMENT: {filename} ---\n\n" + current_content + f"\n\n--- END DOCUMENT: {filename} ---\n\n"
+
+                    # 2. Extract images (if PDF) into the common images folder
+                    if filename.lower().endswith('.pdf'):
+                        try:
+                            # Import PDF specific libraries here if not globally imported
+                            import fitz  # PyMuPDF
+
+                            pdf_document = fitz.open(file_path)
+                            image_count = 0
+                            for page_num in range(len(pdf_document)):
+                                page = pdf_document[page_num]
+                                image_list = page.get_images(full=True)
+                                for img_index, img in enumerate(image_list):
+                                    xref = img[0]
+                                    base_image = pdf_document.extract_image(xref)
+                                    image_bytes = base_image["image"]
+                                    image_ext = base_image["ext"]
+                                    # Create a unique name to avoid collisions
+                                    image_filename = f"{os.path.splitext(filename)[0]}_page{page_num+1}_img{img_index+1}.{image_ext}"
+                                    with open(os.path.join(images_folder, image_filename), "wb") as img_file:
+                                        img_file.write(image_bytes)
+                                        image_count += 1
+                            logger.info(f"Extracted {image_count} images from {filename} into {images_folder}")
+                        except ImportError as ie:
+                            logger.warning(f"PDF image extraction skipped for {filename}: {str(ie)}")
+                        except Exception as pdf_err:
+                            logger.error(f"Error extracting images from PDF {filename}: {str(pdf_err)}")
+
+                    # 3. Store individual document in database
+                    title = filename.rsplit('.', 1)[0]
+                    file_type = filename.rsplit('.', 1)[1].lower()
+                    document = Document(
+                        title=title,
+                        # Store original content? Or maybe just metadata? Storing combined later.
+                        # For now, let's store the individual content for potential future use.
+                        content=current_content,
+                        filename=filename,
+                        file_type=file_type
+                    )
+                    db.session.add(document)
+                    db.session.flush() # Flush to get document ID without full commit yet
+                    processed_document_ids.append(document.id)
+                    logger.info(f"Saved Document record for {filename} with ID {document.id}")
+
+                    processed_count += 1
+                    # Don't clean up file_path yet, needed for potential later access
+
+                except Exception as e:
+                    db.session.rollback() # Rollback DB changes for this specific file
+                    logger.error(f"Error processing file {filename}: {str(e)}", exc_info=True)
+                    flash(f'Error processing file {filename}: {str(e)}', 'danger')
+                    error_count += 1
+                    # Optionally remove the failed file from session_upload_base if desired
+                    try:
+                        if os.path.exists(file_path): os.remove(file_path)
+                    except Exception as cleanup_err:
+                         logger.error(f"Error removing failed file {file_path}: {cleanup_err}")
+            elif file:
+                 flash(f'Invalid file type for {file.filename}. Allowed types: {", ".join(ALLOWED_EXTENSIONS)}', 'danger')
+                 error_count += 1
+
+        # --- After processing all files ---
+        if processed_count > 0:
+            # 4. Extract topics from combined content
+            granularity = 50 # Default granularity
+            logger.info(f"Extracting topics from combined content ({len(combined_content)} chars) at granularity {granularity}")
+            topics_dict = topic_extractor.extract_topics(combined_content, granularity)
+
+            # 5. Save Topics to DB (linked to the first document ID)
+            primary_document_id = processed_document_ids[0]
+            logger.info(f"Saving {len(topics_dict)} topics to DB, linked to primary document ID {primary_document_id}")
+            for topic_id, topic_data in topics_dict.items():
+                # Check if topic already exists for this primary document (e.g., from a previous failed run)
+                existing_topic = Topic.query.filter_by(document_id=primary_document_id, topic_id=topic_id).first()
+                if not existing_topic:
+                    topic = Topic(
+                        topic_id=topic_id,
+                        name=topic_data['name'],
+                        description=topic_data.get('description', ''),
+                        document_id=primary_document_id # Link to the first document
+                    )
+                    db.session.add(topic)
+                else:
+                    # Optionally update existing topic? For now, just skip if exists.
+                    logger.debug(f"Topic {topic_id} already exists for document {primary_document_id}, skipping.")
+
+            db.session.commit() # Commit all documents and topics together
+
+            # 6. Update Session Data
+            sessions_data[session_id]['document_content'] = combined_content
             sessions_data[session_id]['topics'] = topics_dict
             sessions_data[session_id]['current_granularity'] = granularity
-            
-            # Store document in database
-            title = filename.rsplit('.', 1)[0]  # Use filename without extension as title
-            file_type = filename.rsplit('.', 1)[1].lower()
-            
-            # Create new Document record
-            document = Document(
-                title=title,
-                content=document_content,
-                filename=filename,
-                file_type=file_type
-            )
-            
-            # Add and commit to get the document ID
-            db.session.add(document)
-            db.session.commit()
-            
-            # Store document ID in session for future reference
-            sessions_data[session_id]['document_id'] = document.id
-            
-            # Create Topic records for each extracted topic
-            for topic_id, topic_data in topics_dict.items():
-                topic = Topic(
-                    topic_id=topic_id,
-                    name=topic_data['name'],
-                    description=topic_data.get('description', ''),
-                    document_id=document.id
-                )
-                db.session.add(topic)
-            
-            # Commit all topic records
-            db.session.commit()
-            
-            flash('Document uploaded and processed successfully!', 'success')
+            sessions_data[session_id]['document_id'] = primary_document_id # Store primary ID
+            sessions_data[session_id]['processed_document_ids'] = processed_document_ids # Store all IDs
+            sessions_data[session_id]['upload_folder'] = session_upload_base # Store path for image analysis
+
+            flash(f'{processed_count} document(s) uploaded and processed successfully!', 'success')
+            if error_count > 0:
+                 flash(f'{error_count} file(s) could not be processed.', 'warning')
+
             return redirect(url_for('results'))
-        
-        except Exception as e:
-            logger.error(f"Error processing document: {str(e)}")
-            flash(f'Error processing document: {str(e)}', 'danger')
-            # Clean up temp folder on error
-            try:
-                shutil.rmtree(upload_folder)
-            except:
-                pass
+        else:
+            db.session.rollback() # Rollback if no files were processed successfully
+            flash('No documents were processed successfully.', 'danger')
+            # Clean up session folder if nothing was processed
+            if session_upload_base and os.path.exists(session_upload_base):
+                try:
+                    shutil.rmtree(session_upload_base)
+                except Exception as cleanup_err:
+                    logger.error(f"Error cleaning up session folder {session_upload_base} after failed upload: {cleanup_err}")
             return redirect(url_for('index'))
-    else:
-        flash(f'Invalid file type. Allowed types: {", ".join(ALLOWED_EXTENSIONS)}', 'danger')
-    
-    return redirect(url_for('index'))
+
+    except Exception as global_err:
+        db.session.rollback()
+        logger.error(f"An unexpected error occurred during file upload: {str(global_err)}", exc_info=True)
+        flash(f'An unexpected error occurred: {str(global_err)}', 'danger')
+        # Clean up session folder on global error
+        if session_upload_base and os.path.exists(session_upload_base):
+            try:
+                shutil.rmtree(session_upload_base)
+            except Exception as cleanup_err:
+                logger.error(f"Error cleaning up session folder {session_upload_base} after global error: {cleanup_err}")
+        return redirect(url_for('index'))
+
 
 @app.route('/results')
 def results():
@@ -828,6 +870,43 @@ def view_topic(topic_id):
         selected_format=topic_data['format'],
         viewing_topic=topic_data
     )
+
+@app.route('/delete_document/<int:document_id>', methods=['POST'])
+def delete_document(document_id):
+    """Deletes a document and its associated data from the database."""
+    try:
+        document = Document.query.get_or_404(document_id)
+        
+        # Cascade delete should handle associated Topics, Notes, ImageAnalyses
+        db.session.delete(document)
+        db.session.commit()
+        
+        # Also remove any associated session data if it exists and matches
+        # This part might be complex if multiple sessions could reference the same doc
+        # For simplicity, we'll just remove it if the current session matches
+        session_id = session.get('session_id')
+        if session_id and session_id in sessions_data:
+            if sessions_data[session_id].get('document_id') == document_id:
+                # Clear the specific session or just remove doc-related keys
+                logger.info(f"Clearing session data for deleted document {document_id} in session {session_id}")
+                # Option 1: Reset the session
+                # sessions_data[session_id] = {'document_content': '', 'topics': {}, 'current_granularity': 50}
+                # Option 2: Remove specific keys (safer if session holds other things)
+                sessions_data[session_id].pop('document_content', None)
+                sessions_data[session_id].pop('topics', None)
+                sessions_data[session_id].pop('document_id', None)
+                sessions_data[session_id].pop('processed_document_ids', None)
+                sessions_data[session_id].pop('upload_folder', None)
+                sessions_data[session_id].pop('generated_notes', None)
+
+
+        flash(f'Document "{document.title}" deleted successfully.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error deleting document {document_id}: {str(e)}")
+        flash(f'Error deleting document: {str(e)}', 'danger')
+        
+    return redirect(url_for('index'))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

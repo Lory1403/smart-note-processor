@@ -25,22 +25,9 @@ function initializeFileUpload() {
             fileInput.click();
         });
 
-        // Display file name when selected
+        // Display file names or count when selected
         fileInput.addEventListener('change', function() {
-            if (fileInput.files.length > 0) {
-                const fileName = fileInput.files[0].name;
-                const fileInfo = document.getElementById('file-info');
-                if (fileInfo) {
-                    fileInfo.textContent = fileName;
-                    fileInfo.classList.remove('d-none');
-                }
-                
-                // Enable submit button
-                const submitBtn = document.getElementById('upload-btn');
-                if (submitBtn) {
-                    submitBtn.disabled = false;
-                }
-            }
+            displayFileInfo(fileInput.files); // Use helper function
         });
 
         // Handle drag and drop
@@ -59,20 +46,34 @@ function initializeFileUpload() {
             
             if (e.dataTransfer.files.length > 0) {
                 fileInput.files = e.dataTransfer.files;
-                const fileName = fileInput.files[0].name;
-                const fileInfo = document.getElementById('file-info');
-                if (fileInfo) {
-                    fileInfo.textContent = fileName;
-                    fileInfo.classList.remove('d-none');
-                }
-                
-                // Enable submit button
-                const submitBtn = document.getElementById('upload-btn');
-                if (submitBtn) {
-                    submitBtn.disabled = false;
-                }
+                displayFileInfo(fileInput.files); // Use helper function
             }
         });
+    }
+}
+
+// Helper function to display file info (count or names)
+function displayFileInfo(files) {
+    const fileInfo = document.getElementById('file-info');
+    const submitBtn = document.getElementById('upload-btn');
+
+    if (files.length > 0) {
+        if (fileInfo) {
+            // Display file count or list names (showing count here)
+            fileInfo.textContent = `${files.length} file(s) selected`;
+            fileInfo.classList.remove('d-none');
+        }
+        if (submitBtn) {
+            submitBtn.disabled = false;
+        }
+    } else {
+        if (fileInfo) {
+            fileInfo.textContent = '';
+            fileInfo.classList.add('d-none');
+        }
+        if (submitBtn) {
+            submitBtn.disabled = true;
+        }
     }
 }
 
