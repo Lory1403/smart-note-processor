@@ -1,112 +1,51 @@
 import os
 import logging
 import time
-import base64
-from typing import Dict, List, Any, Optional
+import requests
+from typing import Dict, Any, Optional
 import json
-import importlib.util
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Check if Google Gemini API is available and import it
-genai = None
-try:
-    import google.generativeai as genai
-    from google.generativeai.types import GenerationConfig
-    logger.info("Successfully imported Google Generative AI library")
-except ImportError as e:
-    logger.warning(f"Could not import Google Generative AI library: {str(e)}")
-except Exception as e:
-    logger.warning(f"Error initializing Google Generative AI: {str(e)}")
-
 class GeminiClient:
     """
-    Client for interacting with Google's Gemini LLM.
+    Client for interacting with the Gemini model via OpenRouter.
     Handles API calls, rate limiting, and error handling.
     """
     
     def __init__(self, api_key: Optional[str] = None):
         """
-        Initialize the Gemini client.
+        Initialize the Gemini client using OpenRouter.
         
         Args:
-            api_key: Google Gemini API key (optional, can be set via env var)
+            api_key: OpenRouter API key (optional, can be set via env var)
         
         Raises:
-            ImportError: If Google generativeai package is not installed
             ValueError: If API key is not provided and not found in environment
         """
-        if genai is None:
-            logger.error("Google generativeai package is not installed")
-            raise ImportError(
-                "Google generativeai package is not installed. "
-                "Install it with 'pip install google-generativeai'"
-            )
-        
         # Get API key from parameter or environment variable
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         
         if not self.api_key:
-            logger.error("No Gemini API key found")
+            logger.error("No OpenRouter API key found")
             raise ValueError(
-                "Gemini API key is required. Either pass it to the constructor "
-                "or set GEMINI_API_KEY environment variable."
+                "OpenRouter API key is required. Either pass it to the constructor "
+                "or set OPENROUTER_API_KEY environment variable."
             )
         
-        logger.info("Configuring Gemini API")
+        logger.info("Gemini client configured to use OpenRouter")
         
-        # Configure the Gemini API
-        try:
-            genai.configure(api_key=self.api_key)
-            
-            # Set model configuration
-            self.model_name = "gemini-1.5-pro"  # Updated to latest model
-            logger.info(f"Using Gemini model: {self.model_name}")
-            
-            # Create a generation config
-            gen_config = {
-                "temperature": 0.2,  # Low temperature for more deterministic outputs
-                "top_p": 0.95,
-                "top_k": 40,
-                "max_output_tokens": 8192,
-            }
-            
-            # Initialize model
-            self.model = genai.GenerativeModel(model_name=self.model_name, generation_config=gen_config)
-            logger.info("Gemini model initialized successfully")
-            
-            # Rate limiting parameters
-            self.requests_per_minute = 10  # Conservative limit
-            self.last_request_time = 0
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize Gemini client: {str(e)}")
-            raise ValueError(f"Failed to initialize Gemini client: {str(e)}")
-    
-    def _handle_rate_limiting(self):
-        """
-        Implement rate limiting to avoid API throttling.
-        Ensures at least 60/requests_per_minute seconds between requests.
-        """
-        current_time = time.time()
-        time_since_last_request = current_time - self.last_request_time
+        # Rate limiting parameters
+        self.requests_per_minute = 10  # Conservative limit
+        self.last_request_time = 0
         
-        # Ensure we're not exceeding the rate limit
-        min_interval = 60.0 / self.requests_per_minute
-        
-        if time_since_last_request < min_interval:
-            # Sleep to respect rate limit
-            sleep_time = min_interval - time_since_last_request
-            logger.debug(f"Rate limiting: Sleeping for {sleep_time:.2f} seconds")
-            time.sleep(sleep_time)
-        
-        # Update last request time
-        self.last_request_time = time.time()
+        # Default model name
+        self.model_name = "google/gemini-2.5-flash-preview"
     
     def generate_content(self, prompt: str, retry_count: int = 1) -> str:
         """
-        Generate content using Gemini LLM.
+        Generate content using Gemini via OpenRouter.
         
         Args:
             prompt: The text prompt to send to Gemini
@@ -118,80 +57,61 @@ class GeminiClient:
         Raises:
             Exception: If generation fails after all retries
         """
-        # Check for quota error trigger words in error messages
-        quota_errors = [
-            "quota exceeded", 
-            "exceeded your current quota", 
-            "rate limit exceeded",
-            "429"
-        ]
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://your-app.com/",
+            "X-Title": "Gemini Client via OpenRouter"
+        }
         
         for attempt in range(retry_count + 1):
             try:
-                # Apply rate limiting but with shorter times for web requests
-                current_time = time.time()
-                time_since_last_request = current_time - self.last_request_time
+                # Prepare the payload
+                payload = {
+                    "model": self.model_name,
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ]
+                }
                 
-                # Ensure we're not exceeding the rate limit
-                min_interval = 60.0 / self.requests_per_minute
+                # Log the payload for debugging
+                logger.debug(f"Payload being sent: {json.dumps(payload, indent=2)}")
                 
-                if time_since_last_request < min_interval:
-                    # Sleep to respect rate limit, but max 5 seconds for web requests
-                    sleep_time = min(min_interval - time_since_last_request, 5)
-                    logger.debug(f"Rate limiting: Sleeping for {sleep_time:.2f} seconds")
-                    time.sleep(sleep_time)
+                # Send the request to OpenRouter
+                response = requests.post(url, headers=headers, json=payload)
                 
-                # Update last request time
-                self.last_request_time = time.time()
+                # Log the response content for debugging
+                logger.debug(f"Response content: {response.text}")
+                response.raise_for_status()
                 
-                # Call the Gemini API
-                response = self.model.generate_content(prompt)
-                
-                # Extract and return text
-                if hasattr(response, 'text'):
-                    return response.text
-                elif hasattr(response, 'parts'):
-                    text_parts = [part.text for part in response.parts]
-                    return ''.join(text_parts)
-                else:
-                    raise ValueError("Unexpected response format from Gemini API")
-                
-            except Exception as e:
-                error_str = str(e).lower()
-                logger.error(f"Gemini API error (attempt {attempt+1}/{retry_count+1}): {str(e)}")
-                
-                # Check if this is a quota error
-                is_quota_error = any(err in error_str for err in quota_errors)
-                
-                if is_quota_error:
-                    logger.warning("Quota limit reached for Gemini API")
-                    return "Error: Quota limit reached for Gemini API. Please try again later or check your API key quota."
+                # Parse the response
+                response_data = response.json()
+                return response_data["choices"][0]["message"]["content"]
+            
+            except requests.exceptions.RequestException as e:
+                logger.error(f"OpenRouter API error (attempt {attempt+1}/{retry_count+1}): {str(e)}")
                 
                 if attempt < retry_count:
-                    # Short backoff for web requests
                     wait_time = 1
                     logger.info(f"Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
                 else:
-                    # Return error message on final failure
                     error_msg = f"Failed to generate content: {str(e)}"
                     logger.error(error_msg)
                     return f"Error: {error_msg}"
     
     def extract_topics(self, text: str, granularity: int) -> Dict[str, Dict[str, Any]]:
         """
-        Extract topics from text with specified granularity level.
+        Extract topics from text with specified granularity level using OpenRouter.
         
         Args:
             text: Document text to extract topics from
             granularity: Integer from 0-100 indicating granularity level
-                - 0: macro-topics (few, broader topics)
-                - 100: micro-topics (many, specific topics)
             
         Returns:
             Dictionary of topics with their details
         """
-        # Construct prompt based on granularity
         granularity_description = self._get_granularity_description(granularity)
         
         prompt = f"""
@@ -216,12 +136,9 @@ class GeminiClient:
         Only respond with the JSON. Do not include any explanations or additional text before or after the JSON.
         """
         
-        # Get response from Gemini
         response_text = self.generate_content(prompt)
         
-        # Extract JSON from response
         try:
-            # Find JSON in the response
             json_start = response_text.find('{')
             json_end = response_text.rfind('}') + 1
             
@@ -229,11 +146,8 @@ class GeminiClient:
                 raise ValueError("No JSON found in response")
                 
             json_str = response_text[json_start:json_end]
-            
-            # Parse the JSON
             response_json = json.loads(json_str)
             
-            # Convert list to dictionary with IDs as keys
             topics_dict = {}
             for topic in response_json.get('topics', []):
                 topic_id = topic.get('id', f"topic_{len(topics_dict)}")
@@ -246,8 +160,6 @@ class GeminiClient:
         except Exception as e:
             logger.error(f"Error parsing topics JSON: {str(e)}")
             logger.debug(f"Response was: {response_text}")
-            
-            # Return a single error topic if parsing fails
             return {
                 'error_topic': {
                     'name': 'Error Extracting Topics',
@@ -275,7 +187,7 @@ class GeminiClient:
             return "Extract more specific sub-topics with moderate detail."
         else:
             return "Extract highly specific, detailed micro-topics (many fine-grained topics)."
-    
+        
     def enhance_topic_info(self, topic_name: str, topic_info: str) -> str:
         """
         Enhance topic information with additional context and explanations.
@@ -305,7 +217,7 @@ class GeminiClient:
         
         enhanced_info = self.generate_content(prompt)
         return enhanced_info
-        
+
     def generate_content_with_image(self, prompt: str, image_data: str, retry_count: int = 1) -> str:
         """
         Generate content using Gemini Vision model with both text prompt and image.
@@ -321,87 +233,47 @@ class GeminiClient:
         Raises:
             Exception: If generation fails after all retries
         """
-        # Check for quota error trigger words in error messages
-        quota_errors = [
-            "quota exceeded", 
-            "exceeded your current quota", 
-            "rate limit exceeded",
-            "429"
-        ]
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://your-app.com/",
+            "X-Title": "Gemini Vision Client via OpenRouter"
+        }
         
         for attempt in range(retry_count + 1):
             try:
-                # Use Gemini-1.5-Pro for vision capabilities (latest model)
-                vision_model_name = "gemini-1.5-pro"
-                logger.info(f"Using vision model: {vision_model_name}")
-                
-                vision_model = genai.GenerativeModel(
-                    model_name=vision_model_name,
-                    generation_config={
-                        "temperature": 0.2,
-                        "top_p": 0.95,
-                        "top_k": 40,
-                        "max_output_tokens": 4096,  # Reduced to avoid longer processing times
-                    }
-                )
-                
-                # Create multipart content (text + image)
-                parts = [
-                    {"text": prompt},
-                    {
-                        "inline_data": {
-                            "mime_type": "image/jpeg",
-                            "data": image_data
+                # Prepare the payload with text and image
+                payload = {
+                    "model": "google/gemini-pro-vision",  # Replace with the correct vision model ID
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "files": [
+                        {
+                            "name": "image.jpg",
+                            "type": "image/jpeg",
+                            "content": image_data
                         }
-                    }
-                ]
+                    ]
+                }
                 
-                # Apply rate limiting but with shorter times for web requests
-                current_time = time.time()
-                time_since_last_request = current_time - self.last_request_time
+                # Send the request to OpenRouter
+                response = requests.post(url, headers=headers, json=payload)
+                response.raise_for_status()
                 
-                # Ensure we're not exceeding the rate limit
-                min_interval = 60.0 / self.requests_per_minute
-                
-                if time_since_last_request < min_interval:
-                    # Sleep to respect rate limit, but max 5 seconds for web requests
-                    sleep_time = min(min_interval - time_since_last_request, 5)
-                    logger.debug(f"Rate limiting: Sleeping for {sleep_time:.2f} seconds")
-                    time.sleep(sleep_time)
-                
-                # Update last request time
-                self.last_request_time = time.time()
-                
-                # Generate content using the vision model
-                response = vision_model.generate_content(parts)
-                
-                # Extract and return text
-                if hasattr(response, 'text'):
-                    return response.text
-                elif hasattr(response, 'parts'):
-                    text_parts = [part.text for part in response.parts]
-                    return ''.join(text_parts)
-                else:
-                    raise ValueError("Unexpected response format from Gemini Vision API")
-                    
-            except Exception as e:
-                error_str = str(e).lower()
+                # Parse the response
+                response_data = response.json()
+                return response_data["choices"][0]["message"]["content"]
+            
+            except requests.exceptions.RequestException as e:
                 logger.error(f"Gemini Vision API error (attempt {attempt+1}/{retry_count+1}): {str(e)}")
                 
-                # Check if this is a quota error
-                is_quota_error = any(err in error_str for err in quota_errors)
-                
-                if is_quota_error:
-                    logger.warning("Quota limit reached for Gemini Vision API")
-                    return "Error: Quota limit reached for Gemini API. Please try again later or check your API key quota."
-                
                 if attempt < retry_count:
-                    # Short backoff for web requests
                     wait_time = 1
-                    logger.info(f"Retrying vision API in {wait_time} seconds...")
+                    logger.info(f"Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
                 else:
-                    # Return error message on final failure
                     error_msg = f"Failed to analyze image: {str(e)}"
                     logger.error(error_msg)
                     return f"Error analyzing image: {error_msg}"
