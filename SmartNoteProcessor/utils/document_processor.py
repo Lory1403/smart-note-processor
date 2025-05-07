@@ -2,6 +2,7 @@ import os
 import logging
 from typing import Dict, List, Any, Optional, Tuple
 import re
+import tempfile
 
 # Import file type specific libraries
 try:
@@ -19,6 +20,18 @@ try:
 except ImportError:
     docx = None
 
+try:
+    import whisper
+    # Consider loading the model once if performance is critical
+    # whisper_model = whisper.load_model("base") # Or "small", "medium", "large"
+except ImportError:
+    whisper = None
+
+try:
+    from moviepy.editor import VideoFileClip
+except ImportError:
+    VideoFileClip = None
+
 logger = logging.getLogger(__name__)
 
 class DocumentProcessor:
@@ -27,21 +40,28 @@ class DocumentProcessor:
     and topic information extraction from the document content.
     """
     
-    def __init__(self, topic_extractor):
+    def __init__(self, gemini_api_key=None):
         """
         Initialize the document processor.
         
         Args:
-            topic_extractor: An instance of TopicExtractor for topic extraction
+            gemini_api_key: API key for GeminiClient (optional)
         """
-        self.topic_extractor = topic_extractor
-    
+        # self.gemini_client = GeminiClient(api_key=gemini_api_key) if gemini_api_key else None # Assuming this is how it's initialized
+        # Define supported extensions
+        self.pdf_extensions = ['.pdf']
+        self.docx_extensions = ['.docx']
+        self.txt_extensions = ['.txt']
+        self.video_extensions = ['.mp4', '.mov', '.avi', '.mkv']
+        self.audio_extensions = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac'] # Added audio extensions
+        self.image_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff']
+
     def extract_text(self, file_path: str, original_filename: str) -> str:
         """
         Extract text from a document file based on its format.
         
         Args:
-            file_path: Path to the temporary file
+            file_path: Path to the temporary file or persistent file
             original_filename: Original name of the uploaded file
             
         Returns:
@@ -50,17 +70,25 @@ class DocumentProcessor:
         Raises:
             ValueError: If the file format is not supported or extraction fails
         """
-        file_extension = os.path.splitext(original_filename)[1].lower()
-        
-        # Extract text based on file extension
-        if file_extension == '.txt' or file_extension == '.md':
-            return self._extract_text_from_txt(file_path)
-        elif file_extension == '.pdf':
+        _, ext = os.path.splitext(original_filename)
+        ext = ext.lower()
+
+        if ext in self.pdf_extensions:
             return self._extract_text_from_pdf(file_path)
-        elif file_extension == '.docx':
+        elif ext in self.docx_extensions:
             return self._extract_text_from_docx(file_path)
+        elif ext in self.txt_extensions:
+            return self._extract_text_from_txt(file_path)
+        elif ext in self.video_extensions:
+            return self._extract_text_from_video(file_path)
+        elif ext in self.audio_extensions: # Handling for audio files
+            return self._extract_text_from_audio(file_path)
+        elif ext in self.image_extensions:
+            logger.info(f"Image file '{original_filename}' received in extract_text. Image content is processed separately.")
+            return f"Placeholder for image file: {original_filename}" 
         else:
-            raise ValueError(f"Unsupported file format: {file_extension}")
+            logger.warning(f"Unsupported file type for direct text extraction: {original_filename}")
+            return f"Unsupported file type for direct text extraction: {original_filename}"
     
     def _extract_text_from_txt(self, file_path: str) -> str:
         """
@@ -157,6 +185,90 @@ class DocumentProcessor:
             logger.error(f"Error extracting text from DOCX: {str(e)}")
             raise ValueError(f"Failed to extract text from DOCX: {str(e)}")
     
+    def _extract_text_from_video(self, file_path: str) -> str:
+        """
+        Extract text (transcription) from a video file using Whisper.
+        
+        Args:
+            file_path: Path to the video file
+            
+        Returns:
+            Transcribed text from the video's audio
+            
+        Raises:
+            ValueError: If required libraries are missing or transcription fails
+        """
+        if not VideoFileClip:
+            raise ValueError("moviepy library is not available. Cannot process video files.")
+        if not whisper:
+            raise ValueError("openai-whisper library is not available. Cannot transcribe video files.")
+        
+        audio_path = None
+        temp_dir = tempfile.mkdtemp()
+        try:
+            logger.info(f"Extracting audio from video: {file_path}")
+            # Extract audio using moviepy
+            video = VideoFileClip(file_path)
+            # Use a temporary file for the audio
+            audio_filename = os.path.splitext(os.path.basename(file_path))[0] + ".mp3"
+            audio_path = os.path.join(temp_dir, audio_filename)
+            video.audio.write_audiofile(audio_path, codec='mp3')
+            video.close() # Close the video file handle
+            logger.info(f"Audio extracted to temporary file: {audio_path}")
+
+            # Transcribe audio using Whisper
+            logger.info(f"Transcribing audio file: {audio_path}")
+            # Load model here or use pre-loaded model
+            model = whisper.load_model("base") # Choose model size based on needs/resources
+            result = model.transcribe(audio_path, fp16=False) # fp16=False might be needed on some CPUs
+            transcription = result["text"]
+            logger.info(f"Transcription complete. Length: {len(transcription)} chars")
+            
+            return transcription
+
+        except Exception as e:
+            logger.error(f"Error processing video file {file_path}: {str(e)}")
+            raise ValueError(f"Failed to extract text from video: {str(e)}")
+        finally:
+            # Clean up temporary audio file and directory
+            if audio_path and os.path.exists(audio_path):
+                try:
+                    os.remove(audio_path)
+                except Exception as rm_err:
+                     logger.error(f"Error removing temporary audio file {audio_path}: {rm_err}")
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as rmdir_err:
+                 logger.error(f"Error removing temporary directory {temp_dir}: {rmdir_err}")
+
+    def _extract_text_from_audio(self, file_path: str) -> str:
+        """
+        Extract text (transcription) from an audio file using Whisper.
+        
+        Args:
+            file_path: Path to the audio file
+            
+        Returns:
+            Transcribed text from the audio
+            
+        Raises:
+            ValueError: If required libraries are missing or transcription fails
+        """
+        if not whisper:
+            raise ValueError("openai-whisper library is not available. Cannot transcribe audio files.")
+        
+        try:
+            logger.info(f"Transcribing audio file: {file_path}")
+            # Consider making model choice configurable or using a smaller default if performance is an issue
+            model = whisper.load_model("base") 
+            result = model.transcribe(file_path, fp16=False) # fp16=False might be needed on some CPUs
+            transcription = result["text"]
+            logger.info(f"Audio transcription complete. Length: {len(transcription)} chars")
+            return transcription
+        except Exception as e:
+            logger.error(f"Error processing audio file {file_path}: {str(e)}", exc_info=True)
+            raise ValueError(f"Failed to extract text from audio: {str(e)}")
+
     def extract_topic_information(self, document_content: str, topic_name: str, gemini_client) -> str:
         """
         Extract information related to a specific topic from the document content.

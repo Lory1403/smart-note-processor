@@ -10,6 +10,9 @@ from datetime import datetime
 import io
 import zipfile
 import re # Import regular expression module
+import subprocess # For potential external tools like ffmpeg/whisper
+import math
+from moviepy.editor import VideoFileClip
 
 from utils.document_processor import DocumentProcessor
 from utils.gemini_client import GeminiClient
@@ -62,7 +65,7 @@ image_analyzer = ImageAnalyzer(gemini_client)
 sessions_data = {}
 
 # Allowed file extensions
-ALLOWED_EXTENSIONS = {'txt', 'pdf', 'docx', 'md'}
+ALLOWED_EXTENSIONS = {'txt', 'pdf', 'docx', 'md', 'mp4', 'mov', 'avi', 'mkv', 'mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac'} # Added video and audio formats
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -253,7 +256,7 @@ def upload_file():
                      except: pass
                  return redirect(url_for('index'))
 
-            # --- Move files and Extract Images to Persistent Folders ---
+            # --- Move files and Extract Images/Frames to Persistent Folders ---
             moved_files_paths = {}
             for doc_id, data in temp_files_to_move.items():
                 persistent_file_path = os.path.join(document_upload_folder, data['filename'])
@@ -262,8 +265,10 @@ def upload_file():
                     moved_files_paths[doc_id] = persistent_file_path
                     logger.info(f"Moved {data['filename']} to {persistent_file_path}")
 
-                    # 2. Extract images (if PDF) into the persistent images folder
-                    if data['filename'].lower().endswith('.pdf'):
+                    file_ext_lower = data['filename'].toLowerCase()
+
+                    # 2a. Extract images (if PDF)
+                    if file_ext_lower.endswith('.pdf'):
                         try:
                             import fitz  # PyMuPDF
                             pdf_document = fitz.open(persistent_file_path) # Open from new location
@@ -287,6 +292,31 @@ def upload_file():
                         except Exception as pdf_err:
                             logger.error(f"Error extracting images from PDF {data['filename']}: {str(pdf_err)}")
 
+                    # 2b. Extract frames (if Video)
+                    elif file_ext_lower.endswith(('.mp4', '.mov', '.avi', '.mkv')):
+                        if VideoFileClip:
+                            try:
+                                logger.info(f"Extracting frames from video: {persistent_file_path}")
+                                video = VideoFileClip(persistent_file_path)
+                                duration = video.duration # Duration in seconds
+                                frame_count = 0
+                                # Extract frame every N seconds (e.g., 10 seconds)
+                                interval = 10
+                                for t in range(0, math.ceil(duration), interval):
+                                    frame_filename = f"{os.path.splitext(data['filename'])[0]}_frame_at_{t}s.jpg"
+                                    frame_path = os.path.join(images_folder, frame_filename)
+                                    try:
+                                        video.save_frame(frame_path, t=t)
+                                        frame_count += 1
+                                    except Exception as frame_save_err:
+                                         logger.error(f"Error saving frame at {t}s for {data['filename']}: {frame_save_err}")
+                                video.close() # Close video file handle
+                                logger.info(f"Extracted {frame_count} frames from {data['filename']} into {images_folder}")
+                            except Exception as video_err:
+                                logger.error(f"Error extracting frames from video {data['filename']}: {str(video_err)}")
+                        else:
+                            logger.warning(f"Frame extraction skipped for {data['filename']}: moviepy library not available.")
+
                 except Exception as move_err:
                     logger.error(f"Error moving file {data['filename']} to persistent storage: {move_err}")
                     # Handle error - maybe remove the DB record? For now, just log.
@@ -298,7 +328,66 @@ def upload_file():
                         logger.error(f"Error removing temp dir {data['temp_dir']} after processing: {cleanup_err}")
 
 
-            # 4. Extract topics from combined content
+            # --- Extract Text for Video and Audio Files (Now that they are in persistent storage) ---
+            temp_combined_content = ""
+            # Assuming processed_document_ids is a list of IDs for documents processed in this upload
+            # And moved_files_paths is a dict mapping doc.id to its persistent path
+            for doc_id in processed_document_ids: # Make sure processed_document_ids and moved_files_paths are correctly populated
+                doc = Document.query.get(doc_id)
+                if doc:
+                    file_ext_lower = os.path.splitext(doc.filename)[1].lower()
+                    
+                    # Check if it's a video or audio file
+                    if file_ext_lower in ALLOWED_EXTENSIONS or file_ext_lower in ALLOWED_EXTENSIONS:
+                        persistent_file_path = moved_files_paths.get(doc.id) 
+                        
+                        if persistent_file_path and os.path.exists(persistent_file_path):
+                            try:
+                                operation_type = "Audio Transcription" if file_ext_lower in ALLOWED_EXTENSIONS else "Video Transcription"
+                                logger.info(f"Starting {operation_type} for: {doc.filename} from {persistent_file_path}")
+                                
+                                # Use the updated document_processor.extract_text method
+                                extracted_text = document_processor.extract_text(persistent_file_path, doc.filename)
+                                
+                                doc.content = extracted_text # Update document content in DB
+                                db.session.add(doc) # Stage update for commit later
+                                
+                                temp_combined_content += f"\n\n--- START DOCUMENT: {doc.filename} ({operation_type}) ---\n\n" + extracted_text + f"\n\n--- END DOCUMENT: {doc.filename} ---\n\n"
+                                logger.info(f"{operation_type} added for {doc.filename}")
+                                
+                            except Exception as trans_err:
+                                error_type = "audio transcription" if file_ext_lower in ALLOWED_EXTENSIONS else "video transcription"
+                                logger.error(f"Failed {error_type} for {doc.filename}: {trans_err}", exc_info=True)
+                                # Keep original placeholder content or mark as failed
+                                original_content_for_failure = doc.content if doc.content and not doc.content.startswith("Placeholder content") else "Extraction failed."
+                                temp_combined_content += f"\n\n--- START DOCUMENT: {doc.filename} ({operation_type} FAILED) ---\n\n" + original_content_for_failure + f"\n\n--- END DOCUMENT: {doc.filename} ---\n\n"
+                        else:
+                            missing_type = "Audio" if file_ext_lower in ALLOWED_EXTENSIONS else "Video"
+                            logger.warning(f"Persistent path not found or file does not exist for {missing_type.lower()} {doc.filename} (expected at {persistent_file_path}), skipping transcription.")
+                            original_content_for_missing = doc.content if doc.content and not doc.content.startswith("Placeholder content") else "Path missing or file inaccessible."
+                            temp_combined_content += f"\n\n--- START DOCUMENT: {doc.filename} ({missing_type} - Path Missing or File Inaccessible) ---\n\n" + original_content_for_missing + f"\n\n--- END DOCUMENT: {doc.filename} ---\n\n"
+                    elif file_ext_lower in ALLOWED_EXTENSIONS:
+                        # How image "content" is added to combined_content depends on your strategy.
+                        # Often, images are analyzed separately, not directly part of text to be topic-modelled.
+                        # Using the placeholder from DocumentProcessor or a specific marker:
+                        temp_combined_content += f"\n\n--- START DOCUMENT: {doc.filename} (Image File) ---\n\n" + (doc.content if doc.content else f"Image file: {doc.filename}. Content analyzed separately.") + f"\n\n--- END DOCUMENT: {doc.filename} ---\n\n"
+                    else: # For text files (PDF, TXT, DOCX) whose content was extracted earlier
+                        temp_combined_content += f"\n\n--- START DOCUMENT: {doc.filename} ---\n\n" + doc.content + f"\n\n--- END DOCUMENT: {doc.filename} ---\n\n"
+            
+            # Ensure changes to doc.content (transcriptions) are committed to the database
+            try:
+                db.session.commit()
+                logger.info("Committed updated document contents (transcriptions) to database.")
+            except Exception as e:
+                db.session.rollback()
+                logger.error(f"Error committing transcribed content to DB: {e}", exc_info=True)
+                flash("Error saving transcriptions to the database.", "danger")
+                # Handle redirect or error display as appropriate
+
+            combined_content = temp_combined_content 
+            sessions_data['document_content'] = combined_content
+
+            # 4. Extract topics from combined content (including transcriptions)
             granularity = 50 # Default granularity
             logger.info(f"Extracting topics from combined content ({len(combined_content)} chars) at granularity {granularity}")
             topics_dict = topic_extractor.extract_topics(combined_content, granularity)

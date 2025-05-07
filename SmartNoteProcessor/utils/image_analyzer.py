@@ -45,24 +45,25 @@ class ImageAnalyzer:
             topic_names_str = ", ".join([f'"{name}"' for name in topic_names])
             
             # Create prompt for Gemini Vision
+            # --- MODIFICA: Prompt più specifico ---
             prompt = f"""
-            Analyze this image and determine if it contains information relevant to any of the following topics:
-            {topic_names_str}
-            
-            For each relevant topic, extract and summarize the visual information from the image that relates to that topic.
-            If the image contains diagrams, charts, or other visual elements, describe how they relate to the topics.
-            If the image is not relevant to any of the topics, respond with "No relevant information found".
-            
-            Format your response as a JSON object like this:
+            Analyze this image carefully. Determine if it illustrates or provides significant visual information for any of the following topics:
+            {topic_names_str}, or any related subtopics treated in the document.
+
+            For EACH topic the image is STRONGLY and DIRECTLY relevant to, provide a concise description (1-3 sentences) explaining HOW the image illustrates that specific topic. Focus on the visual elements (diagrams, charts, scenes, objects) and their connection to the topic.
+
+            IGNORE topics where the image's relevance is weak, indirect, or purely based on text shown within the image itself unless that text is part of a diagram/chart relevant to the topic. Do not describe images that are just blocks of text.
+
+            Format your response STRICTLY as a JSON object like this:
             {{
-                "topic_name_1": "Description of how the image relates to this topic...",
-                "topic_name_2": "Description of how the image relates to this topic...",
-                ...
+                "topic_name_directly_illustrated_1": "Description of how the image illustrates this topic...",
+                "topic_name_directly_illustrated_2": "Description of how the image illustrates this topic..."
             }}
-            
-            Only include topics that are actually relevant to the image content.
+
+            If the image is not directly relevant to ANY of the listed topics, respond with an empty JSON object: {{}}
             """
-            
+            # --- FINE MODIFICA ---
+
             # Call Gemini Vision API with image and prompt
             vision_response = self.gemini_client.generate_content_with_image(prompt, encoded_image)
             
@@ -130,10 +131,19 @@ class ImageAnalyzer:
             import json
             import re
             
-            # Find JSON-like structure in the response
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            # Find JSON-like structure in the response, handling potential markdown backticks
+            response_cleaned = response.strip().strip('`') # Remove potential markdown code block markers
+            if response_cleaned.startswith("json"):
+                 response_cleaned = response_cleaned[4:].strip() # Remove potential 'json' prefix
+
+            json_match = re.search(r'\{.*\}', response_cleaned, re.DOTALL)
             if json_match:
                 json_str = json_match.group(0)
+                # --- AGGIUNTA: Gestione JSON vuoto o quasi vuoto ---
+                if len(json_str) <= 2: # Considera "{}" come vuoto
+                    logger.info("Vision response was an empty JSON object, indicating no relevant topics found.")
+                    return {} # Restituisce dizionario vuoto
+                # --- FINE AGGIUNTA ---
                 parsed_data = json.loads(json_str)
                 
                 # Match topic names to topic IDs
@@ -141,11 +151,23 @@ class ImageAnalyzer:
                 
                 # Map information to topic IDs
                 for topic_name, info in parsed_data.items():
-                    if topic_name in name_to_id:
-                        info_by_topic[name_to_id[topic_name]] = info
-            
+                    if topic_name in name_to_id and isinstance(info, str) and info.strip(): # Assicurati che l'info sia una stringa non vuota
+                        info_by_topic[name_to_id[topic_name]] = info.strip()
+                    else:
+                         logger.warning(f"Topic name '{topic_name}' from vision response not found in provided topics or info was invalid.")
+
+            # --- MODIFICA: Gestione risposta non JSON ---
+            elif "no relevant information found" in response.lower() or response.strip() == '{}':
+                 logger.info("Vision response indicated no relevant topics found (non-JSON).")
+                 return {} # Restituisce dizionario vuoto se la risposta testuale indica irrilevanza
+            else:
+                 logger.warning(f"Could not find valid JSON in vision response: {response}")
+            # --- FINE MODIFICA ---
+
+        except json.JSONDecodeError as json_err:
+            logger.error(f"Error parsing vision response JSON: {json_err}. Response: {response}")
         except Exception as e:
-            logger.error(f"Error parsing vision response: {str(e)}")
+            logger.error(f"Unexpected error parsing vision response: {str(e)}. Response: {response}")
         
         return info_by_topic
     

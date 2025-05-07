@@ -20,5 +20,6 @@
     pkgs.freetype
     pkgs.postgresql
     pkgs.openssl
+    pkgs.ffmpeg-full # Needed by moviepy and whisper
   ];
 }
