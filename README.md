@@ -2,7 +2,7 @@
 
 Live demo of the generator is available [here](https://large-scale-ai.onrender.com)!!!
 
-Temp demo --> [here](https://f358-45-80-28-112.ngrok-free.app)
+Temp demo --> [here](https://normally-smart-goldfish.ngrok-free.app)
 
 ## 📝 Overview
 This project is designed to help students and professionals studying complex topics by automatically generating structured, easy-to-navigate study notes. The system processes study materials, including images, videos, and text documents (PDF, Word), and creates well-organized Markdown files. These files are:
