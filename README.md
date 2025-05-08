@@ -1,6 +1,7 @@
 # 📚 AI-Powered Study Notes Generator
 
 Live demo of the generator is available [here](https://large-scale-ai.onrender.com)!!!
+
 Temp demo --> [here](https://f358-45-80-28-112.ngrok-free.app)
 
 ## 📝 Overview
