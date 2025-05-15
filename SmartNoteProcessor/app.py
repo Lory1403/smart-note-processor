@@ -20,6 +20,8 @@ from utils.topic_extractor import TopicExtractor
 from utils.format_converter import FormatConverter
 from utils.image_analyzer import ImageAnalyzer
 from database import db
+from models import Document, Topic, Note, ImageAnalysis
+from orchestrator import SmartNotesOrchestrator # Add this import
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -51,7 +53,7 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db.init_app(app)
 
 # Import models after db is initialized to avoid circular imports
-from models import Document, Topic, Note, ImageAnalysis
+# from models import Document, Topic, Note, ImageAnalysis # This line is usually here
 
 # Initialize components
 gemini_client = GeminiClient(api_key=os.environ.get("OPENROUTER_API_KEY", ""))
@@ -59,6 +61,16 @@ topic_extractor = TopicExtractor(gemini_client)
 document_processor = DocumentProcessor(topic_extractor)
 format_converter = FormatConverter()
 image_analyzer = ImageAnalyzer(gemini_client)
+# Initialize the orchestrator
+notes_orchestrator = SmartNotesOrchestrator(
+    document_processor=document_processor,
+    topic_extractor=topic_extractor,
+    gemini_client=gemini_client,
+    format_converter=format_converter,
+    image_analyzer=image_analyzer,
+    db=db,
+    app_config=app.config # Pass app.config for access to UPLOAD_FOLDER etc.
+)
 
 # In-memory storage for user sessions (will gradually be replaced by DB)
 # Structure: { session_id: { 'document_content': str, 'topics': {}, 'current_granularity': int } }
@@ -521,7 +533,6 @@ def update_granularity():
 
 @app.route('/generate_notes', methods=['POST'])
 def generate_notes():
-    start_time = datetime.now()
     try:
         session_id = session.get('session_id')
         output_format = request.form.get('format', 'markdown')
@@ -533,261 +544,54 @@ def generate_notes():
 
         session_data = sessions_data[session_id]
         topics_dict = session_data.get('topics', {})
-        document_content = session_data.get('document_content', '')
-        document_id = session_data.get('document_id') # Get document ID
+        combined_content = session_data.get('document_content', '')
+        primary_document_id = session_data.get('document_id')
 
         if not topics_dict:
             flash('Nessun argomento trovato. Per favore aggiusta la granularità e riprova.', 'warning')
-            return render_template(
-                'results.html',
-                topics={},
-                granularity=session_data.get('current_granularity', 50),
-                notes={},
-                selected_format=output_format
-            )
+            return render_template('results.html', topics={}, granularity=session_data.get('current_granularity', 50), notes={}, selected_format=output_format)
 
-        if not document_id:
-             flash('ID documento non trovato nella sessione. Impossibile processare le immagini.', 'danger')
-             process_images = False # Disable image processing if document_id is missing
+        if not primary_document_id:
+            flash('ID documento non trovato nella sessione. Impossibile procedere con la generazione delle note.', 'danger')
+            return render_template('results.html', topics=topics_dict, granularity=session_data.get('current_granularity', 50), notes={}, selected_format=output_format)
+        
+        # Determine the path to the document's specific upload folder
+        document_specific_upload_folder = None
+        if primary_document_id:
+            # Assumes UPLOAD_FOLDER is the base, and each document has a subfolder named by its ID
+            # e.g., instance/uploads/<document_id>/
+            doc_folder_path = os.path.join(app.config['UPLOAD_FOLDER'], str(primary_document_id))
+            if os.path.isdir(doc_folder_path):
+                document_specific_upload_folder = doc_folder_path
+            else:
+                logger.warning(f"Document-specific upload folder not found at {doc_folder_path} for document ID {primary_document_id}. Image processing might be affected.")
 
-        # Ottieni gli argomenti dal database per questo documento
-        db_topics = Topic.query.filter_by(document_id=document_id).all()
-        topic_map = {topic.topic_id: topic for topic in db_topics}
+        # Call the orchestrator's main processing method
+        generated_notes, errors_encountered, successfully_processed_count = notes_orchestrator.process_and_generate(
+            primary_document_id=primary_document_id,
+            combined_content=combined_content,
+            topics_dict=topics_dict,
+            output_format=output_format,
+            process_images_flag=process_images,
+            document_upload_folder_path=document_specific_upload_folder
+        )
 
-        # Initialize generated_notes for this run
-        generated_notes = {}
-        successfully_processed_count = 0
-        errors_encountered = []
-
-        logger.info(f"Avvio generazione automatica per {len(topics_dict)} argomenti. Formato: {output_format}, Immagini: {process_images}")
-
-        # --- Determine persistent image folder path ---
-        images_folder = None
-        if document_id:
-            document_upload_folder = os.path.join(app.config['UPLOAD_FOLDER'], str(document_id))
-            images_folder = os.path.join(document_upload_folder, 'images')
-            if not os.path.exists(images_folder):
-                images_folder = None
-
-        # --- FIX: Iterate over topics_dict, not generated_notes ---
-        for topic_id, topic_data in topics_dict.items():
-            logger.info(f"Processando argomento: {topic_data['name']} ({topic_id})")
-            try:
-                # Controlla se esiste già una nota nel DB per questo formato
-                existing_db_note = None
-                db_topic_obj = topic_map.get(topic_id) # Trova l'oggetto Topic del DB corrispondente
-
-                if db_topic_obj:
-                    existing_db_note = Note.query.filter_by(
-                        topic_id=db_topic_obj.id,
-                        format=output_format
-                    ).first()
-
-                if existing_db_note:
-                    logger.info(f"Utilizzo nota esistente dal DB per l'argomento: {topic_data['name']}")
-                    # Store the existing note content in the current run's generated_notes
-                    generated_notes[topic_id] = {
-                        'name': topic_data['name'],
-                        'content': existing_db_note.content,
-                        'format': output_format
-                    }
-                    successfully_processed_count += 1
-                    continue # Passa al prossimo argomento nel ciclo
-
-                # --- Generazione Nuova Nota ---
-                logger.info(f"Estrazione informazioni per l'argomento: {topic_data['name']}")
-                topic_info = document_processor.extract_topic_information(
-                    document_content,
-                    topic_data['name'],
-                    gemini_client
-                )
-
-                if isinstance(topic_info, str) and "Error: Quota limit reached" in topic_info:
-                    logger.warning(f"Quota API raggiunta durante estrazione per {topic_data['name']}")
-                    errors_encountered.append(f"Quota API raggiunta durante l'estrazione per '{topic_data['name']}'.")
-                    continue # Prova il prossimo argomento
-
-                logger.info(f"Miglioramento informazioni per l'argomento: {topic_data['name']}")
-                enhanced_info = gemini_client.enhance_topic_info(
-                    topic_data['name'],
-                    topic_info
-                )
-
-                if isinstance(enhanced_info, str) and "Error: Quota limit reached" in enhanced_info:
-                    logger.warning(f"Quota API raggiunta durante miglioramento per {topic_data['name']}")
-                    errors_encountered.append(f"Quota API raggiunta durante il miglioramento per '{topic_data['name']}'.")
-                    continue # Prova il prossimo argomento
-
-                # --- Processamento Immagini (Opzionale) ---
-                image_content = ""
-                if process_images and images_folder and db_topic_obj:
-                    try:
-                        logger.info(f"Ricerca immagini per l'argomento: {topic_data['name']} in {images_folder}")
-
-                        image_files = [f for f in os.listdir(images_folder)
-                                       if os.path.isfile(os.path.join(images_folder, f))
-                                       and f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-
-                        db_analyses = ImageAnalysis.query.filter_by(topic_id=db_topic_obj.id).all()
-                        existing_analyses = {a.filename: a.analysis_result for a in db_analyses}
-                        processed_one_image = False
-
-                        for img_file in image_files:
-                            single_image_path = os.path.join(images_folder, img_file)
-
-                            if img_file in existing_analyses:
-                                logger.info(f"Utilizzo analisi immagine esistente dal DB: {img_file}")
-                                description = existing_analyses[img_file]
-                                if description and not description.startswith('Error:'):
-                                    if not image_content: image_content = "\n\n## Contenuto Visivo Correlato\n\n"
-                                    image_content += f"### Figura: {img_file}\n\n{description}\n\n"
-                            elif not processed_one_image:
-                                logger.info(f"Processando nuova immagine: {img_file}")
-
-                                temp_image_analysis_dir = tempfile.mkdtemp()
-                                temp_image_path_for_analysis = os.path.join(temp_image_analysis_dir, img_file)
-                                shutil.copy(single_image_path, temp_image_path_for_analysis)
-                                topic_images = image_analyzer.analyze_images_for_topics(
-                                    temp_image_analysis_dir,
-                                    {topic_id: topic_data}
-                                )
-                                shutil.rmtree(temp_image_analysis_dir) # Clean up temp dir
-
-                                description = None
-                                if (topic_images and topic_id in topic_images and
-                                    topic_images[topic_id] and img_file in topic_images[topic_id]):
-                                    description = topic_images[topic_id][img_file]
-
-                                if description:
-                                    if not image_content: image_content = "\n\n## Contenuto Visivo Correlato\n\n"
-                                    image_content += f"### Figura: {img_file}\n\n{description}\n\n"
-
-                                    # --- FIX: Add the 'path' value ---
-                                    # Store relative path within the document's upload folder
-                                    relative_image_path = os.path.join('images', img_file)
-
-                                    img_analysis = ImageAnalysis(
-                                        filename=img_file,
-                                        path=relative_image_path, # Add the path here
-                                        topic_id=db_topic_obj.id,
-                                        analysis_result=description
-                                    )
-                                    # --- End Fix ---
-                                    db.session.add(img_analysis)
-                                    db.session.commit() # Commit should now work
-                                    logger.info(f"Analisi immagine {img_file} salvata nel DB.")
-                                    processed_one_image = True
-
-                    except Exception as img_err:
-                        logger.error(f"Errore durante processamento immagini per {topic_data['name']}: {str(img_err)}")
-                        errors_encountered.append(f"Errore imprevisto durante l'analisi delle immagini per '{topic_data['name']}'.")
-
-                # --- Combinazione e Formattazione ---
-                combined_content = enhanced_info
-                if image_content:
-                    combined_content += image_content
-
-                formatted_content = format_converter.convert(
-                    topic_data['name'],
-                    combined_content,
-                    output_format
-                )
-
-                # --- Salvataggio Nota nel DB ---
-                if db_topic_obj:
-                    existing_note = Note.query.filter_by(
-                        topic_id=db_topic_obj.id,
-                        format=output_format
-                    ).first()
-
-                    if existing_note:
-                        logger.info(f"Aggiornamento nota esistente nel DB per {topic_data['name']}")
-                        existing_note.content = formatted_content
-                        existing_note.updated_at = datetime.utcnow()
-                    else:
-                        logger.info(f"Creazione nuova nota nel DB per {topic_data['name']}")
-                        note = Note(
-                            content=formatted_content,
-                            format=output_format,
-                            topic_id=db_topic_obj.id
-                        )
-                        db.session.add(note)
-
-                    db.session.commit()
-
-                    # Store the newly generated note content
-                    generated_notes[topic_id] = {
-                        'name': topic_data['name'],
-                        'content': formatted_content,
-                        'format': output_format
-                    }
-                    successfully_processed_count += 1
-                else:
-                    logger.warning(f"Impossibile salvare la nota per l'argomento {topic_data['name']} ({topic_id}) perché non trovato nel DB.")
-                    errors_encountered.append(f"Impossibile trovare l'argomento '{topic_data['name']}' nel database per salvare la nota.")
-
-            except Exception as e:
-                db.session.rollback()
-                logger.error(f"Errore durante il processamento dell'argomento {topic_data['name']} ({topic_id}): {str(e)}", exc_info=True)
-                errors_encountered.append(f"Errore imprevisto durante il processamento di '{topic_data['name']}': {str(e)}")
-
-        logger.info(f"Ciclo di generazione completato. Argomenti processati con successo: {successfully_processed_count}/{len(topics_dict)}")
-
-        # --- HYPERLINKING ---
-        if generated_notes:
-             logger.info("Aggiunta hyperlink alle note generate...")
-             try:
-                 all_notes_for_hyperlinking = {}
-                 for t_id, t_data in topics_dict.items():
-                     if t_id in generated_notes:
-                         all_notes_for_hyperlinking[t_id] = generated_notes[t_id]
-                     elif topic_map.get(t_id):
-                         db_note = Note.query.filter_by(topic_id=topic_map[t_id].id, format=output_format).first()
-                         if db_note:
-                             all_notes_for_hyperlinking[t_id] = {'name': t_data['name'], 'content': db_note.content, 'format': output_format}
-
-                 notes_with_links = format_converter.add_hyperlinks(
-                     all_notes_for_hyperlinking,
-                     topics_dict,
-                     output_format
-                 )
-
-                 logger.info("Aggiornamento note nel DB con hyperlink...")
-                 for linked_topic_id, linked_note_data in notes_with_links.items():
-                     db_topic_obj = topic_map.get(linked_topic_id)
-                     if db_topic_obj:
-                         db_note = Note.query.filter_by(
-                             topic_id=db_topic_obj.id,
-                             format=output_format
-                         ).first()
-                         if db_note and db_note.content != linked_note_data['content']:
-                             db_note.content = linked_note_data['content']
-                             db_note.updated_at = datetime.utcnow()
-
-                 db.session.commit()
-                 generated_notes = notes_with_links
-                 logger.info("Hyperlink aggiunti e salvati nel DB.")
-
-             except Exception as link_err:
-                 db.session.rollback()
-                 logger.error(f"Errore durante l'aggiunta degli hyperlink: {str(link_err)}", exc_info=True)
-                 errors_encountered.append(f"Errore durante l'aggiornamento dei link interni: {str(link_err)}")
-
-        # Save the results of THIS run to the session
+        # Update session with the results from the orchestrator
         session_data['generated_notes'] = generated_notes
         session_data['selected_format'] = output_format
+        # sessions_data[session_id] = session_data # Re-assign if session_data was a copy
 
-        total_time = (datetime.now() - start_time).total_seconds()
-        logger.info(f"Generazione completata in {total_time:.2f} secondi.")
+        logger.info(f"Generazione note via orchestrator completata. Note generate: {successfully_processed_count}, Errori: {len(errors_encountered)}")
 
-        if not errors_encountered and successfully_processed_count == len(topics_dict):
-            flash(f'Tutte le {successfully_processed_count} note sono state generate con successo in {total_time:.2f} secondi!', 'success')
+        # Flash messages based on outcome
+        if not errors_encountered and successfully_processed_count == len(topics_dict) and successfully_processed_count > 0:
+            flash(f'Tutte le {successfully_processed_count} note sono state generate con successo!', 'success')
         elif successfully_processed_count > 0:
-            flash(f'Generazione completata con {successfully_processed_count}/{len(topics_dict)} note generate. Tempo totale: {total_time:.2f} secondi. Controlla i messaggi per eventuali errori.', 'warning')
+            flash(f'Generazione parzialmente completata: {successfully_processed_count}/{len(topics_dict)} note generate. Controlla i messaggi per eventuali errori.', 'warning')
             for error in errors_encountered:
                 flash(error, 'danger')
         else:
-            flash(f'Generazione fallita. Nessuna nota è stata generata. Tempo totale: {total_time:.2f} secondi.', 'danger')
+            flash('Generazione fallita. Nessuna nota è stata generata.', 'danger')
             for error in errors_encountered:
                 flash(error, 'danger')
 
@@ -795,26 +599,20 @@ def generate_notes():
             'results.html',
             topics=topics_dict,
             granularity=session_data.get('current_granularity', 50),
-            notes=generated_notes,
+            notes=generated_notes, # Use notes from orchestrator
             selected_format=output_format
         )
 
     except Exception as e:
         db.session.rollback()
-        logger.error(f"Errore generale durante la generazione automatica delle note: {str(e)}", exc_info=True)
+        logger.error(f"Errore generale in /generate_notes: {str(e)}", exc_info=True)
         flash(f'Errore imprevisto durante la generazione delle note: {str(e)}', 'danger')
-        session_id = session.get('session_id')
-        if session_id and session_id in sessions_data:
-             session_data = sessions_data[session_id]
-             return render_template(
-                 'results.html',
-                 topics=session_data.get('topics', {}),
-                 granularity=session_data.get('current_granularity', 50),
-                 notes=session_data.get('generated_notes', {}),
-                 selected_format=request.form.get('format', 'markdown')
-             )
-        else:
-             return redirect(url_for('index'))
+        # Fallback rendering
+        session_id_fallback = session.get('session_id')
+        if session_id_fallback and session_id_fallback in sessions_data:
+             s_data = sessions_data[session_id_fallback]
+             return render_template('results.html', topics=s_data.get('topics', {}), granularity=s_data.get('current_granularity', 50), notes=s_data.get('generated_notes', {}), selected_format=request.form.get('format', 'markdown'))
+        return redirect(url_for('index'))
 
 @app.route('/download/<topic_id>', methods=['GET'])
 def download_topic(topic_id):

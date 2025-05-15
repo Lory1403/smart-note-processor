@@ -153,17 +153,14 @@ Please evaluate the summary based on:
 3. Logical structure and flow
 4. Accuracy and relevance to the original arguments and content
 
-Provide a detailed evaluation and suggest any improvements if necessary.
+Provide a detailed evaluation and a percentage score (0-100%) for the accuracy of the summary.
 """
-
         logger.debug(f"Calling third model: {model3}")
         third_response = requests.post(
-            url="https://openrouter.ai/api/v1/chat/completions",
+            "https://api.openrouter.ai/v1/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://agent.replit.com/",
-                "X-Title": "Summary Evaluator"
+                "Content-Type": "application/json"
             },
             json={
                 "model": model3,
@@ -172,20 +169,26 @@ Provide a detailed evaluation and suggest any improvements if necessary.
                 ]
             }
         )
-        
         third_response.raise_for_status()
-        evaluation = third_response.json()["choices"][0]["message"]["content"]
-        
-        # Prepare model details
-        model_details = {
-            "analysis_model": model1,
-            "synthesis_model": model2,
-            "evaluation_model": model3,
-            "analysis_length": len(first_output),
-            "summary_length": len(final_summary)
-        }
-        
-        return final_summary, evaluation, model_details
+        evaluation_result = third_response.json()["choices"][0]["message"]["content"]
+
+        # Extract accuracy percentage from the evaluation result
+        try:
+            accuracy_percentage = int(
+                next(filter(lambda x: x.isdigit(), evaluation_result.split()))
+            )
+            logger.info(f"Accuracy percentage: {accuracy_percentage}%")
+        except Exception as e:
+            logger.error(f"Failed to extract accuracy percentage: {str(e)}")
+            accuracy_percentage = 0
+
+        # Check if accuracy is above the threshold
+        if accuracy_percentage >= 75:
+            logger.info("Summary accuracy is acceptable.")
+            return final_summary, {"accuracy": accuracy_percentage}
+        else:
+            logger.warning("Summary accuracy is below threshold. Regenerating...")
+            return generate_summary_with_openrouter(arguments, content_text, file_contents, model1, model2, model3, generate_markdown)
         
     except requests.exceptions.RequestException as e:
         logger.error(f"Error calling OpenRouter API: {e}")
