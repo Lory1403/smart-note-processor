@@ -2,7 +2,7 @@ import os
 import logging
 from datetime import datetime
 import concurrent.futures # Aggiungi questo import
-from models import Topic, Note, db as database_session # Assicurati che db sia importato correttamente o passato
+from models import Topic, Note, Document, db as database_session # Assicurati che db sia importato correttamente o passato
 from flask import current_app
 
 from utils.document_processor import DocumentProcessor

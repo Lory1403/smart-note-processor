@@ -191,18 +191,8 @@ document.addEventListener('DOMContentLoaded', function() {
     const emptyChatMessageElement = document.getElementById('emptyChatMessage');
     const documentIdInput = chatForm ? chatForm.querySelector('input[name="document_id"]') : null;
 
-    // Protezione: blocca altri listener di submit (come quelli di main.js)
-    if (chatForm) {
-        chatForm.addEventListener('submit', function(e) {
-            // e.stopImmediatePropagation(); // Consider uncommenting if other general form handlers in main.js might interfere
-        }, true); // Ensure this listener is added in the capture phase if needed
-    }
-
     function addMessageToChat(sender, message, isHtml = false) {
-        if (!chatDisplay) {
-            // console.error("[ChatScript-Moved] chatDisplay not found"); // Log from main.js context
-            return;
-        }
+        if (!chatDisplay) return;
         if (emptyChatMessageElement && emptyChatMessageElement.parentNode === chatDisplay) {
             chatDisplay.removeChild(emptyChatMessageElement);
         }
@@ -233,37 +223,37 @@ document.addEventListener('DOMContentLoaded', function() {
             // console.log("[ChatScript-Moved] Submit event triggered");
             event.preventDefault(); // ESSENTIAL
             // console.log("[ChatScript-Moved] event.preventDefault() called");
-
             const userMessage = userInstructionInput.value.trim();
-            // const documentId = documentIdInput.value; // Already available
+            // const documentId = documentIdInput.value; // Already available via FormData
+
             if (!userMessage) {
                 // console.log("[ChatScript-Moved] Empty user message");
                 return;
             }
+
+            // Create FormData BEFORE disabling any inputs
+            const formData = new FormData(chatForm);
+
             addMessageToChat('user', userMessage);
             const originalButtonText = chatSubmitButton.innerHTML;
             userInstructionInput.disabled = true;
             chatSubmitButton.disabled = true;
             chatSubmitButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Invio...';
-            
-            const formData = new FormData(chatForm);
-            
+
             // console.log("[ChatScript-Moved] Fetching:", chatForm.action);
             fetch(chatForm.action, {
                 method: 'POST',
                 body: formData
             })
             .then(response => {
-                // console.log("[ChatScript-Moved] Fetch response status:", response.status);
-                if (!response.ok) {
-                    return response.text().then(text => {
-                        throw new Error(`Server error: ${response.status} - ${text}`);
+                if (!response.ok) { // Check for HTTP errors
+                    return response.json().then(errData => { // Try to parse error JSON
+                        throw { status: response.status, data: errData };
                     });
                 }
                 return response.json();
             })
             .then(data => {
-                // console.log("[ChatScript-Moved] Fetch data received:", data);
                 if (data.ai_message) {
                     addMessageToChat('ai', data.ai_message, true);
                 } else if (data.error) {
@@ -273,21 +263,22 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             })
             .catch(error => {
-                // console.error("[ChatScript-Moved] Fetch error:", error);
-                addMessageToChat('ai', `Errore di comunicazione: ${error.message}`, false);
+                console.error("Fetch error:", error);
+                let errorMsg = "Errore di comunicazione con il server.";
+                if (error && error.data && error.data.error) {
+                    errorMsg = `Errore dal server: ${error.data.error}`;
+                } else if (error && error.message) {
+                    errorMsg = error.message;
+                }
+                addMessageToChat('ai', errorMsg, false);
             })
             .finally(() => {
-                userInstructionInput.value = '';
+                userInstructionInput.value = ''; // Clear input
                 userInstructionInput.disabled = false;
                 chatSubmitButton.disabled = false;
                 chatSubmitButton.innerHTML = originalButtonText;
                 userInstructionInput.focus();
-                // console.log("[ChatScript-Moved] Fetch finished");
             });
         });
-        // console.log("[ChatScript-Moved] Chat form listener attached from main.js.");
-    } else {
-        // This will log on pages other than results.html, which is expected.
-        // console.log("[ChatScript-Moved] Chat elements not found on this page (expected if not results.html).");
     }
 });
