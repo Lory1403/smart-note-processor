@@ -32,6 +32,9 @@ try:
 except ImportError:
     VideoFileClip = None
 
+from utils.topic_extractor import TopicExtractor
+from utils.summary_extractor import SummaryExtractor
+
 logger = logging.getLogger(__name__)
 
 class DocumentProcessor:
@@ -47,7 +50,7 @@ class DocumentProcessor:
         Args:
             gemini_api_key: API key for GeminiClient (optional)
         """
-        # self.gemini_client = GeminiClient(api_key=gemini_api_key) if gemini_api_key else None # Assuming this is how it's initialized
+        # self.openrouter_client = OpenrouterClient(api_key=gemini_api_key) if gemini_api_key else None # Assuming this is how it's initialized
         # Define supported extensions
         self.pdf_extensions = ['.pdf']
         self.docx_extensions = ['.docx']
@@ -268,37 +271,34 @@ class DocumentProcessor:
         except Exception as e:
             logger.error(f"Error processing audio file {file_path}: {str(e)}", exc_info=True)
             raise ValueError(f"Failed to extract text from audio: {str(e)}")
-
-    def extract_topic_information(self, document_content: str, topic_name: str, gemini_client) -> str:
-        """
-        Extract information related to a specific topic from the document content.
-        
-        Args:
-            document_content: The full text content of the document
-            topic_name: The name of the topic to extract information for
-            gemini_client: Instance of GeminiClient for LLM operations
-            
-        Returns:
-            Extracted information related to the topic
-        """
+    
+    def extract_topics(self, document_content: str, granularity: int) -> Dict[str, Dict[str, Any]]:
         try:
-            # Ask Gemini to extract information for the specific topic
-            prompt = f"""
-            Extract all information related to the topic "{topic_name}" from the following document content.
-            Focus only on relevant sentences, paragraphs, and details that directly relate to this topic.
-            Organize the information in a clear and coherent manner.
             
-            Document content:
-            {document_content[:50000]}  # Limit to avoid token limits
-            """
+            topics = TopicExtractor.extract_topics(document_content, granularity)
             
-            topic_info = gemini_client.generate_content(prompt)
+            # Log the number of topics found
+            logger.info(f"Created {len(topics)} topics with {granularity}% granularity")
             
-            # If no meaningful information was found
-            if not topic_info or len(topic_info.strip()) < 50:
-                return f"No detailed information found for the topic '{topic_name}' in the document."
+            return topics
+        except Exception as e:
+            logger.error(f"Error in topic extraction: {str(e)}")
+            # Return a single error topic in case of failure
+            return {
+                'error': {
+                    'name': 'Error in topic extraction',
+                    'description': f"Failed to extract topics: {str(e)}"
+                }
+            }
+    
+    def extract_resumes(self, document_content: str, topic_name: str) -> str:
+        try:
+            resume = SummaryExtractor.extract_resumes(self, document_content, topic_name)
             
-            return topic_info
+            # Log the number of topics found
+            logger.info(f"Created resume for {topic_name}")
+            
+            return resume
         except Exception as e:
             logger.error(f"Error extracting topic information: {str(e)}")
             return f"Error extracting information for topic '{topic_name}': {str(e)}"

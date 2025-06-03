@@ -49,7 +49,17 @@
                         <p id="file-info" class="text-info d-none"></p>
                         <input type="file" id="file-input" name="file" class="file-input" accept=".txt,.pdf,.docx,.md,.mp4,.mov,.avi,.mkv,.mp3,.wav,.m4a,.aac,.ogg,.flac" multiple>
                     </div>
-                    
+
+                    <div class="mb-3">
+                        <button id="youtube-link-btn" type="button" class="btn btn-outline-danger mb-2">
+                            <i class="fab fa-youtube me-1"></i> Insert YouTube link
+                        </button>
+                        <div id="youtube-link-group" class="d-none">
+                            <input type="text" id="youtube-link-input" name="youtube_link" class="form-control mb-2" placeholder="Incolla qui il link YouTube">
+                            <button id="youtube-process-btn" type="submit" class="btn btn-danger">Processa Link</button>
+                        </div>
+                    </div>
+
                     <div class="d-grid">
                         <button id="upload-btn" type="submit" class="btn btn-info" disabled>
                             <i class="fas fa-upload me-2"></i> Process Document
@@ -101,4 +111,50 @@
         </div>
     </div>
 </div>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const ytBtn = document.getElementById('youtube-link-btn');
+    const ytGroup = document.getElementById('youtube-link-group');
+    const ytInput = document.getElementById('youtube-link-input');
+    const ytProcessBtn = document.getElementById('youtube-process-btn');
+    const uploadBtn = document.getElementById('upload-btn');
+    const fileInput = document.getElementById('file-input');
+
+    if (ytBtn && ytGroup && ytInput && ytProcessBtn) {
+        ytBtn.addEventListener('click', function() {
+            ytGroup.classList.toggle('d-none');
+            ytInput.focus();
+        });
+
+        ytInput.addEventListener('input', function() {
+            ytProcessBtn.disabled = ytInput.value.trim() === '';
+        });
+
+        // Disabilita il pulsante upload se c'è un link YouTube
+        ytInput.addEventListener('input', function() {
+            if (ytInput.value.trim() !== '') {
+                uploadBtn.disabled = true;
+            } else {
+                uploadBtn.disabled = fileInput.files.length === 0;
+            }
+        });
+
+        // Disabilita il pulsante processa link se l'input è vuoto
+        ytProcessBtn.disabled = true;
+    }
+
+    // Abilita il pulsante upload se ci sono file selezionati
+    if (fileInput && uploadBtn) {
+        fileInput.addEventListener('change', function() {
+            if (fileInput.files.length > 0) {
+                uploadBtn.disabled = false;
+                if (ytInput) ytInput.value = '';
+                if (ytProcessBtn) ytProcessBtn.disabled = true;
+            } else {
+                uploadBtn.disabled = true;
+            }
+        });
+    }
+});
+</script>
 {% endblock %}

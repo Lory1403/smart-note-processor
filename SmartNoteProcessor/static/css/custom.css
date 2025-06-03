@@ -118,3 +118,71 @@
     width: 3rem;
     height: 3rem;
 }
+
+.chat-container {
+    max-width: 800px; /* O la larghezza che preferisci */
+    margin: auto;
+}
+
+.chat-display-area {
+    height: 400px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    padding: 15px;
+    background-color: #1c2333;
+    border: 1px solid #dee2e6;
+    border-bottom: none; /* Il bordo inferiore sarà sul card-footer */
+}
+
+.chat-message {
+    padding: 10px 15px;
+    margin-bottom: 10px;
+    border-radius: 18px;
+    max-width: 75%;
+    word-wrap: break-word; /* Per andare a capo con parole lunghe */
+    box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+}
+
+.chat-message p {
+    margin-bottom: 0.25rem; /* Spazio ridotto tra sender e messaggio */
+    white-space: pre-wrap; /* Mantiene a capo e spazi */
+}
+
+.chat-message .message-sender {
+    font-weight: bold;
+    font-size: 0.9em;
+    margin-bottom: 3px;
+    color: #555;
+}
+
+.user-message {
+    background-color: #1E4154; /* Blu Bootstrap primario */
+    color: white;
+    align-self: flex-end;
+    border-radius: 18px 18px 5px 18px; /* Angoli arrotondati specifici */
+}
+
+.user-message .message-sender {
+    color: #e0e0e0; /* Colore più chiaro per il sender su sfondo scuro */
+}
+
+.ai-message {
+    background-color: #f1f1f1; /* Cambiato da #e9ecef a un grigio leggermente diverso */
+    color: #333;
+    align-self: flex-start;
+    border-radius: 18px 18px 18px 5px; /* Angoli arrotondati specifici */
+}
+
+.chat-input-form .form-control {
+    border-radius: 0.25rem 0 0 0.25rem; /* Arrotonda solo gli angoli sinistri */
+}
+
+.chat-input-form .btn {
+    border-radius: 0 0.25rem 0.25rem 0; /* Arrotonda solo gli angoli destri */
+}
+
+.chat-card-footer {
+    border-top: 1px solid #232A39;
+    background-color: #232A39;
+}

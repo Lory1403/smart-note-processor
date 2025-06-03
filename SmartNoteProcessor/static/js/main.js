@@ -15,6 +15,18 @@ document.addEventListener('DOMContentLoaded', function() {
     initializeGranularitySlider();
     initializeFormatSelector();
     addEventListeners();
+
+    const mergeForm = document.getElementById('merge-form');
+    if (mergeForm) {
+        const checkboxes = mergeForm.querySelectorAll('input[type="checkbox"][name="selected_topics"]');
+        const mergeBtn = document.getElementById('merge-btn');
+        checkboxes.forEach(cb => {
+            cb.addEventListener('change', function() {
+                const checkedCount = Array.from(checkboxes).filter(c => c.checked).length;
+                mergeBtn.disabled = checkedCount < 2;
+            });
+        });
+    }
 });
 
 // Initialize file upload functionality
@@ -111,7 +123,7 @@ function initializeFormatSelector() {
     }
 }
 
-// Add event listeners for forms
+// Add event listeners for forms (EXCLUDING CHAT FORM)
 function addEventListeners() {
     // Show loading overlay when forms are submitted
     if (uploadForm) {
@@ -169,3 +181,113 @@ function copyToClipboard(elementId) {
         }, 2000);
     }
 }
+
+// Chat logic moved from results.html
+document.addEventListener('DOMContentLoaded', function() {
+    const chatForm = document.getElementById('chatForm');
+    const userInstructionInput = document.getElementById('userInstructionInput');
+    const chatSubmitButton = document.getElementById('chatSubmitButton');
+    const chatDisplay = document.getElementById('chatDisplayArea');
+    const emptyChatMessageElement = document.getElementById('emptyChatMessage');
+    const documentIdInput = chatForm ? chatForm.querySelector('input[name="document_id"]') : null;
+
+    // Protezione: blocca altri listener di submit (come quelli di main.js)
+    if (chatForm) {
+        chatForm.addEventListener('submit', function(e) {
+            // e.stopImmediatePropagation(); // Consider uncommenting if other general form handlers in main.js might interfere
+        }, true); // Ensure this listener is added in the capture phase if needed
+    }
+
+    function addMessageToChat(sender, message, isHtml = false) {
+        if (!chatDisplay) {
+            // console.error("[ChatScript-Moved] chatDisplay not found"); // Log from main.js context
+            return;
+        }
+        if (emptyChatMessageElement && emptyChatMessageElement.parentNode === chatDisplay) {
+            chatDisplay.removeChild(emptyChatMessageElement);
+        }
+        const messageWrapper = document.createElement('div');
+        messageWrapper.classList.add('chat-message');
+        const senderP = document.createElement('p');
+        senderP.classList.add('message-sender');
+        const messageP = document.createElement('p');
+        if (sender === 'user') {
+            messageWrapper.classList.add('user-message');
+            senderP.textContent = 'Tu:';
+            messageP.textContent = message;
+        } else {
+            messageWrapper.classList.add('ai-message');
+            senderP.textContent = 'AI:';
+            if (isHtml) messageP.innerHTML = message;
+            else messageP.textContent = message;
+        }
+        messageWrapper.appendChild(senderP);
+        messageWrapper.appendChild(messageP);
+        chatDisplay.appendChild(messageWrapper);
+        chatDisplay.scrollTop = chatDisplay.scrollHeight;
+    }
+
+    if (chatForm && userInstructionInput && chatSubmitButton && documentIdInput) {
+        // console.log("[ChatScript-Moved] Attaching listener to chatForm from main.js");
+        chatForm.addEventListener('submit', function(event) {
+            // console.log("[ChatScript-Moved] Submit event triggered");
+            event.preventDefault(); // ESSENTIAL
+            // console.log("[ChatScript-Moved] event.preventDefault() called");
+
+            const userMessage = userInstructionInput.value.trim();
+            // const documentId = documentIdInput.value; // Already available
+            if (!userMessage) {
+                // console.log("[ChatScript-Moved] Empty user message");
+                return;
+            }
+            addMessageToChat('user', userMessage);
+            const originalButtonText = chatSubmitButton.innerHTML;
+            userInstructionInput.disabled = true;
+            chatSubmitButton.disabled = true;
+            chatSubmitButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Invio...';
+            
+            const formData = new FormData(chatForm);
+            
+            // console.log("[ChatScript-Moved] Fetching:", chatForm.action);
+            fetch(chatForm.action, {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => {
+                // console.log("[ChatScript-Moved] Fetch response status:", response.status);
+                if (!response.ok) {
+                    return response.text().then(text => {
+                        throw new Error(`Server error: ${response.status} - ${text}`);
+                    });
+                }
+                return response.json();
+            })
+            .then(data => {
+                // console.log("[ChatScript-Moved] Fetch data received:", data);
+                if (data.ai_message) {
+                    addMessageToChat('ai', data.ai_message, true);
+                } else if (data.error) {
+                    addMessageToChat('ai', `Errore: ${data.error}`, false);
+                } else {
+                    addMessageToChat('ai', "Risposta inattesa dal server.", false);
+                }
+            })
+            .catch(error => {
+                // console.error("[ChatScript-Moved] Fetch error:", error);
+                addMessageToChat('ai', `Errore di comunicazione: ${error.message}`, false);
+            })
+            .finally(() => {
+                userInstructionInput.value = '';
+                userInstructionInput.disabled = false;
+                chatSubmitButton.disabled = false;
+                chatSubmitButton.innerHTML = originalButtonText;
+                userInstructionInput.focus();
+                // console.log("[ChatScript-Moved] Fetch finished");
+            });
+        });
+        // console.log("[ChatScript-Moved] Chat form listener attached from main.js.");
+    } else {
+        // This will log on pages other than results.html, which is expected.
+        // console.log("[ChatScript-Moved] Chat elements not found on this page (expected if not results.html).");
+    }
+});

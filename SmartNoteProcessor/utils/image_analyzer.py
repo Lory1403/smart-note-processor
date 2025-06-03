@@ -4,6 +4,8 @@ import base64
 from typing import Dict, List, Any, Optional, Tuple
 from io import BytesIO
 from PIL import Image
+from models import ImageAnalysis, Topic
+import json # Import json at the module level
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -14,14 +16,8 @@ class ImageAnalyzer:
     related to specific topics.
     """
     
-    def __init__(self, gemini_client):
-        """
-        Initialize the image analyzer.
-        
-        Args:
-            gemini_client: An instance of GeminiClient for LLM operations
-        """
-        self.gemini_client = gemini_client
+    def __init__(self, openrouter_client):
+        self.openrouter_client = openrouter_client
     
     def extract_info_from_image(self, image_path: str, topics: Dict[str, Any]) -> Dict[str, str]:
         """
@@ -36,16 +32,13 @@ class ImageAnalyzer:
         """
         try:
             # Encode image for Gemini Vision model
-            encoded_image = self._encode_image(image_path)
-            if not encoded_image:
-                return {}
+            image_analyzer = ImageAnalyzer(self.openrouter_client)
                 
             # Prepare list of topic names for the prompt
             topic_names = [topic_data['name'] for topic_id, topic_data in topics.items()]
             topic_names_str = ", ".join([f'"{name}"' for name in topic_names])
             
             # Create prompt for Gemini Vision
-            # --- MODIFICA: Prompt più specifico ---
             prompt = f"""
             Analyze this image carefully. Determine if it illustrates or provides significant visual information for any of the following topics:
             {topic_names_str}, or any related subtopics treated in the document.
@@ -62,13 +55,12 @@ class ImageAnalyzer:
 
             If the image is not directly relevant to ANY of the listed topics, respond with an empty JSON object: {{}}
             """
-            # --- FINE MODIFICA ---
 
-            # Call Gemini Vision API with image and prompt
-            vision_response = self.gemini_client.generate_content_with_image(prompt, encoded_image)
+            vision_response = self.openrouter_client.generate_content_with_image(prompt, image_path)
             
             # Parse response to extract topic-relevant information
-            info_by_topic = self._parse_vision_response(vision_response, topics)
+            image_analyzer = ImageAnalyzer(self.openrouter_client)
+            info_by_topic = image_analyzer._parse_vision_response(vision_response, topics)
             
             return info_by_topic
             
@@ -128,7 +120,6 @@ class ImageAnalyzer:
         
         try:
             # Try to find a JSON object in the response
-            import json
             import re
             
             # Find JSON-like structure in the response, handling potential markdown backticks
@@ -207,7 +198,8 @@ class ImageAnalyzer:
                 image_path = os.path.join(images_folder, image_file)
                 
                 # Extract information from image
-                info_by_topic = self.extract_info_from_image(image_path, topics)
+                image_analyzer = ImageAnalyzer(self.openrouter_client)
+                info_by_topic = image_analyzer.extract_info_from_image(image_path, topics)
                 
                 # Add information to result
                 for topic_id, info in info_by_topic.items():
@@ -219,3 +211,123 @@ class ImageAnalyzer:
         except Exception as e:
             logger.error(f"Error analyzing images in folder: {str(e)}")
             return image_info_by_topic
+        
+    def get_topic_correlation(self, image_path: str, topics: Dict[str, Any]) -> str:
+        try:
+            # Encode image for Gemini Vision model
+            image_analyzer = ImageAnalyzer(self.openrouter_client)
+                
+            # Prepare list of topic names for the prompt
+            topic_names = [topic_data['name'] for topic_id, topic_data in topics.items()]
+            topic_names_str = ", ".join([f'"{name}"' for name in topic_names])
+            
+            # Create prompt for Gemini Vision
+            prompt = f"""
+            Please analyze this image carefully. Determine whether it illustrates or provides meaningful visual information for any of the following topics: "{topic_names_str} "
+            I ask you to calculate a percentage of correlation between the topic and the image
+
+            I ask you to generate a response in STRICTLY JSON format structured as follows:
+            {{
+            "topic_name_1": "Percentage...",
+            "topic_name_2": "Percentage..."
+            }}
+
+            If the image is not directly relevant to ANY of the topics listed, respond with an empty JSON object: {{}}
+            If the image contains only text, please ignore it and respond with an empty JSON object: {{}}
+            """
+
+            vision_response = self.openrouter_client.generate_percentage(prompt, image_path)
+            
+            # Parse response to extract topic-relevant information
+            image_analyzer = ImageAnalyzer(self.openrouter_client)
+            info_by_topic = image_analyzer._parse_vision_response(vision_response, topics)
+            
+            return info_by_topic
+        
+        except Exception as e:
+            logger.error(f"Error analyzing image: {str(e)}")
+            return {}
+
+    def analyze_images_and_get_summary(self, topics: Dict[str, Any], images_folder: str, db_session) -> Tuple[str, List[ImageAnalysis]]:
+        """
+        Analizza tutte le immagini nella cartella fornita rispetto ai topic e restituisce un riassunto testuale
+        e una lista di oggetti ImageAnalysis transienti.
+        """
+        summary_lines = []
+        new_image_analysis_objects = [] # Lista per raccogliere i nuovi oggetti ImageAnalysis
+
+        if not os.path.isdir(images_folder):
+            return "", new_image_analysis_objects
+
+        image_files = [f for f in os.listdir(images_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif'))]
+        if not image_files:
+            return "", new_image_analysis_objects
+
+        all_results_json_parts = {}
+
+        for img_filename in image_files:
+            img_path = os.path.join(images_folder, img_filename)
+            try:
+                # Assicurati che 'get_topic_correlation' restituisca un JSON string valido o None/{}
+                analysis_result_from_correlation = self.get_topic_correlation(img_path, topics)
+                
+                analysis_data = {}
+                # Controlla se il risultato è una stringa prima di tentare il parsing
+                if isinstance(analysis_result_from_correlation, str):
+                    if analysis_result_from_correlation.strip() and analysis_result_from_correlation.strip() != "{}":
+                        try:
+                            analysis_data = json.loads(analysis_result_from_correlation)
+                            all_results_json_parts[img_filename] = analysis_data # Store parsed JSON
+                        except json.JSONDecodeError:
+                            logger.error(f"Failed to parse JSON from get_topic_correlation for {img_filename}: {analysis_result_from_correlation}")
+                            summary_lines.append(f"- **{img_filename}**: Errore nell'analisi (JSON non valido)")
+                            continue # Skip this image if JSON is invalid
+                elif isinstance(analysis_result_from_correlation, dict):
+                    # Se è già un dizionario (es. {} da un errore in get_topic_correlation), usalo direttamente
+                    analysis_data = analysis_result_from_correlation
+                    if analysis_data: # Se non è vuoto
+                         all_results_json_parts[img_filename] = analysis_data
+
+
+                if analysis_data: # Proceed if we have valid analysis data
+                    # Questa logica per 'topics_db_objs' deve essere corretta se 'analysis_data.keys()'
+                    # sono nomi di topic e non ID di Topic del DB.
+                    # Per ora, assumiamo che sia gestita correttamente o che venga passata una mappatura.
+                    # Temporaneamente, per evitare errori, la lasceremo vuota se la logica di mapping non è chiara.
+                    # TODO: Rivedere la logica di mapping tra i risultati dell'analisi (nomi topic?) e gli ID dei Topic del DB.
+                    
+                    # Placeholder: questa parte richiede una logica corretta per mappare i risultati ai Topic del DB.
+                    # Per ora, creiamo ImageAnalysis senza la relazione 'topics' se la logica di mapping non è chiara.
+                    relevant_topic_db_objects = []
+                    # Esempio di come potrebbe essere (richiede che `topics` contenga info per mappare nomi a ID DB):
+                    # topic_name_to_db_id_map = {data['name']: topic_db_id for topic_db_id, data in topics_input_to_correlation.items()}
+                    # relevant_topic_db_ids = []
+                    # for topic_name, percentage_str in analysis_data.items():
+                    #     if float(percentage_str.rstrip('%')) > 75 and topic_name in topic_name_to_db_id_map:
+                    #         relevant_topic_db_ids.append(topic_name_to_db_id_map[topic_name])
+                    # if relevant_topic_db_ids:
+                    #    relevant_topic_db_objects = db_session.query(Topic).filter(Topic.id.in_(relevant_topic_db_ids)).all()
+
+                    image_analysis = ImageAnalysis(
+                        filename=img_filename,
+                        path=img_path, # Salva il percorso completo o relativo come necessario
+                        analysis_result=json.dumps(analysis_data), # Salva il JSON come stringa
+                        # topics=relevant_topic_db_objects # Assegna i Topic ORM objects
+                    )
+                    new_image_analysis_objects.append(image_analysis) # Aggiungi l'oggetto transient alla lista
+
+                    rel_img_path = os.path.join(os.path.basename(os.path.dirname(img_path)), img_filename) # Path relativo per Markdown/HTML
+                    summary_lines.append(
+                        f"- ![]({rel_img_path})\n  **{img_filename}**: {json.dumps(analysis_data)}"
+                    )
+            except Exception as e:
+                logger.error(f"Errore durante l'analisi dell'immagine {img_filename}: {e}", exc_info=True)
+                summary_lines.append(f"- **{img_filename}**: Errore durante l'analisi ({e})")
+
+        # Rimosso: db_session.commit()
+
+        final_summary_text = ""
+        if summary_lines:
+            final_summary_text = "\n\n### Analisi delle immagini correlate\n" + "\n".join(summary_lines) + "\n"
+        
+        return final_summary_text, new_image_analysis_objects

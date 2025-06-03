@@ -1,5 +1,6 @@
 import logging
 from typing import Dict, List, Any, Optional
+from utils.openrouter_client import OpenRouterClient
 
 logger = logging.getLogger(__name__)
 
@@ -9,14 +10,14 @@ class TopicExtractor:
     Uses Gemini LLM for intelligent topic extraction.
     """
     
-    def __init__(self, gemini_client):
+    def __init__(self, openrouter_client):
         """
         Initialize the topic extractor.
         
         Args:
             gemini_client: An instance of GeminiClient for LLM operations
         """
-        self.gemini_client = gemini_client
+        self.openrouter_client = openrouter_client
     
     def extract_topics(self, document_content: str, granularity: int) -> Dict[str, Dict[str, Any]]:
         """
@@ -43,7 +44,7 @@ class TopicExtractor:
             granularity = max(0, min(100, int(granularity)))
             
             # Use Gemini to extract topics
-            topics = self.gemini_client.extract_topics(document_content, granularity)
+            topics = OpenRouterClient.extract_topics(self, document_content, granularity)
             
             # Log the number of topics found
             logger.info(f"Extracted {len(topics)} topics at granularity level {granularity}")

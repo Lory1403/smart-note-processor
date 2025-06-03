@@ -40,14 +40,25 @@
                 
                 <!-- Topic List -->
                 {% if topics %}
-                <div class="list-group">
-                    {% for topic_id, topic in topics.items() %}
-                    <a href="{{ url_for('view_topic', topic_id=topic_id) }}" 
-                       class="list-group-item list-group-item-action {% if viewing_topic and viewing_topic.name == topic.name %}active{% endif %}">
-                        {{ topic.name }}
-                    </a>
-                    {% endfor %}
-                </div>
+                <form id="merge-form" action="{{ url_for('merge_topics') }}" method="POST" class="mb-3">
+                    <div class="list-group mb-2">
+                        {% for topic_id, topic in topics.items() %}
+                        <label class="list-group-item d-flex align-items-center">
+                            <input type="checkbox" class="form-check-input me-2" name="selected_topics" value="{{ topic_id }}">
+                            <span class="flex-grow-1">
+                                <a href="{{ url_for('view_topic', topic_id=topic_id) }}" class="text-decoration-none {% if viewing_topic and viewing_topic.name == topic.name %}fw-bold text-info{% endif %}">
+                                    {{ topic.name }}
+                                </a>
+                            </span>
+                        </label>
+                        {% endfor %}
+                    </div>
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-warning" id="merge-btn" disabled>
+                            <i class="fas fa-object-group me-1"></i> Unisci Topic Selezionati
+                        </button>
+                    </div>
+                </form>
                 {% else %}
                 <div class="alert alert-secondary">
                     <i class="fas fa-info-circle me-2"></i> No topics extracted yet.
@@ -157,4 +168,53 @@
         {% endif %}
     </div>
 </div>
+
+<!-- Nuova Sezione Chat -->
+<div class="container mt-4 chat-container">
+    <div class="card">
+        <div class="card-header">
+            <h4>Chat con l'Assistente AI</h4>
+        </div>
+        <div class="card-body chat-display-area" id="chatDisplayArea">
+            {% if session_data and session_data.chat_history %}
+                {% for chat_item in session_data.chat_history %}
+                    {% if chat_item.sender == 'user' %}
+                        <div class="chat-message user-message">
+                            <p class="message-sender">Tu:</p>
+                            <p>{{ chat_item.message }}</p>
+                        </div>
+                    {% elif chat_item.sender == 'ai' %}
+                        <div class="chat-message ai-message">
+                            <p class="message-sender">AI:</p>
+                            <p>{{ chat_item.message | safe }}</p>
+                        </div>
+                    {% endif %}
+                {% endfor %}
+            {% else %}
+                <p class="text-muted text-center" id="emptyChatMessage">La cronologia della chat apparirà qui.</p>
+            {% endif %}
+        </div>
+        <div class="card-footer chat-card-footer">
+            <form id="chatForm" method="POST" action="{{ url_for('summary_interaction') }}" class="chat-input-form">
+                <div class="input-group">
+                    <textarea id="userInstructionInput" name="user_instruction" class="form-control" rows="2" placeholder="Fai una domanda o richiedi una modifica..." aria-label="Chat input"></textarea>
+                    <button id="chatSubmitButton" type="submit" class="btn btn-primary">Invia</button>
+                </div>
+                <input type="hidden" name="document_id" value="{{ session_data.get('document_id') if session_data else '' }}">
+            </form>
+        </div>
+    </div>
+</div>
+
+{# Rimuovi o commenta la vecchia sezione summary-interaction-section #}
+{#
+<div class="summary-interaction-section">
+  <h3>Richiedi modifiche</h3>
+  <form method="POST" action="{{ url_for('summary_interaction') }}">
+    <textarea name="user_instruction" rows="4" style="width:100%;" placeholder="Scrivi qui le tue richieste..."></textarea>
+    <input type="hidden" name="document_id" value="{{ session_data.get('document_id') }}">
+    <button type="submit" class="btn btn-primary mt-2">Invia</button>
+  </form>
+</div>
+#}
 {% endblock %}

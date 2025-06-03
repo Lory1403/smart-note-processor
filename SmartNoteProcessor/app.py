@@ -1,27 +1,27 @@
 import os
 import logging
 import uuid
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, make_response
 from werkzeug.utils import secure_filename
 import tempfile
 import shutil
-import json
-from datetime import datetime
 import io
 import zipfile
 import re # Import regular expression module
-import subprocess # For potential external tools like ffmpeg/whisper
 import math
+import hashlib
 from moviepy.editor import VideoFileClip
 
 from utils.document_processor import DocumentProcessor
-from utils.gemini_client import GeminiClient
+from utils.openrouter_client import OpenRouterClient
 from utils.topic_extractor import TopicExtractor
 from utils.format_converter import FormatConverter
 from utils.image_analyzer import ImageAnalyzer
+from utils.resumes_enhancer import ResumeesEnhancer # Import ResumeesEnhancer
 from database import db
-from models import Document, Topic, Note, ImageAnalysis
-from orchestrator import SmartNotesOrchestrator # Add this import
+from models import db, Document, Topic, Note, ChatMessage # Aggiungi ChatMessage
+from orchestrator import SmartNotesOrchestrator
+from datetime import datetime # Assicurati che datetime sia importato
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -56,20 +56,23 @@ db.init_app(app)
 # from models import Document, Topic, Note, ImageAnalysis # This line is usually here
 
 # Initialize components
-gemini_client = GeminiClient(api_key=os.environ.get("OPENROUTER_API_KEY", ""))
-topic_extractor = TopicExtractor(gemini_client)
-document_processor = DocumentProcessor(topic_extractor)
+openrouter_client = OpenRouterClient()
 format_converter = FormatConverter()
-image_analyzer = ImageAnalyzer(gemini_client)
-# Initialize the orchestrator
+topic_extractor = TopicExtractor(openrouter_client)
+image_analyzer = ImageAnalyzer(openrouter_client)
+document_processor = DocumentProcessor(topic_extractor)
+resumes_enhancer = ResumeesEnhancer(openrouter_client) # Initialize ResumeesEnhancer
+
 notes_orchestrator = SmartNotesOrchestrator(
     document_processor=document_processor,
     topic_extractor=topic_extractor,
-    gemini_client=gemini_client,
+    openrouter_client=openrouter_client,
     format_converter=format_converter,
     image_analyzer=image_analyzer,
+    resumes_enhancer=resumes_enhancer, # Pass resumes_enhancer
     db=db,
-    app_config=app.config # Pass app.config for access to UPLOAD_FOLDER etc.
+    app_config=app.config,
+    flask_app=app  # Pass the Flask app instance
 )
 
 # In-memory storage for user sessions (will gradually be replaced by DB)
@@ -160,6 +163,39 @@ def load_document(document_id):
 @app.route('/upload', methods=['POST'])
 def upload_file():
     uploaded_files = request.files.getlist('file')
+    youtube_link = request.form.get('youtube_link', '').strip()
+
+    # Scarica il video YouTube se presente
+    if youtube_link:
+        import yt_dlp
+        temp_dir = tempfile.mkdtemp()
+        ydl_opts = {
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'merge_output_format': 'mp4',
+            'quiet': True,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(youtube_link, download=True)
+                video_path = ydl.prepare_filename(info)
+                # Se il file non è mp4, rinominalo
+                if not video_path.endswith('.mp4'):
+                    new_video_path = os.path.splitext(video_path)[0] + '.mp4'
+                    os.rename(video_path, new_video_path)
+                    video_path = new_video_path
+                # Simula un file caricato
+                class FileObj:
+                    def __init__(self, path):
+                        self.filename = os.path.basename(path)
+                        self.path = path
+                    def save(self, dst):
+                        shutil.copy2(self.path, dst)
+                uploaded_files = list(uploaded_files) + [FileObj(video_path)]
+                logger.info(f"Scaricato video YouTube: {video_path}")
+        except Exception as e:
+            logger.error(f"Errore nel download del video YouTube: {e}")
+            flash(f"Errore nel download del video YouTube: {e}", "danger")
 
     if not uploaded_files or all(f.filename == '' for f in uploaded_files):
         flash('No selected file(s)', 'danger')
@@ -277,32 +313,49 @@ def upload_file():
                     moved_files_paths[doc_id] = persistent_file_path
                     logger.info(f"Moved {data['filename']} to {persistent_file_path}")
 
-                    file_ext_lower = data['filename'].toLowerCase()
+                    file_ext_lower = data['filename'].lower()
 
                     # 2a. Extract images (if PDF)
                     if file_ext_lower.endswith('.pdf'):
                         try:
                             import fitz  # PyMuPDF
-                            pdf_document = fitz.open(persistent_file_path) # Open from new location
+                            os.makedirs(images_folder, exist_ok=True)  # Crea cartella se manca
+                            pdf_document = fitz.open(persistent_file_path)
                             image_count = 0
+                            logger.info(f"Processing PDF {data['filename']} with {len(pdf_document)} pages")
+
                             for page_num in range(len(pdf_document)):
                                 page = pdf_document[page_num]
                                 image_list = page.get_images(full=True)
+                                
+                                if not image_list:
+                                    logger.debug(f"No images found in page {page_num+1}")
+                                    continue
+
                                 for img_index, img in enumerate(image_list):
                                     xref = img[0]
                                     base_image = pdf_document.extract_image(xref)
                                     image_bytes = base_image["image"]
                                     image_ext = base_image["ext"]
-                                    image_filename = f"{os.path.splitext(data['filename'])[0]}_page{page_num+1}_img{img_index+1}.{image_ext}"
-                                    # Save to persistent images folder
+                                    
+                                    # Genera un nome file univoco con hash
+                                    image_hash = hashlib.md5(image_bytes).hexdigest()[:8]
+                                    image_filename = f"{os.path.splitext(data['filename'])[0]}_page{page_num+1}_img{image_hash}.{image_ext}"
+                                    
+                                    # Salva l'immagine
                                     with open(os.path.join(images_folder, image_filename), "wb") as img_file:
                                         img_file.write(image_bytes)
                                         image_count += 1
-                            logger.info(f"Extracted {image_count} images from {data['filename']} into {images_folder}")
-                        except ImportError as ie:
-                            logger.warning(f"PDF image extraction skipped for {data['filename']}: {str(ie)}")
-                        except Exception as pdf_err:
-                            logger.error(f"Error extracting images from PDF {data['filename']}: {str(pdf_err)}")
+                                        logger.debug(f"Extracted image {image_filename} (size: {len(image_bytes)} bytes)")
+
+                            logger.info(f"Extracted {image_count} images from {data['filename']}")
+                        except ImportError:
+                            logger.warning("PyMuPDF (fitz) not installed. PDF image extraction skipped.")
+                        except Exception as e:
+                            logger.error(f"Failed to extract images: {str(e)}", exc_info=True)
+                        finally:
+                            if 'pdf_document' in locals():
+                                pdf_document.close()
 
                     # 2b. Extract frames (if Video)
                     elif file_ext_lower.endswith(('.mp4', '.mov', '.avi', '.mkv')):
@@ -466,14 +519,59 @@ def results():
         return redirect(url_for('index'))
     
     session_data = sessions_data[session_id]
-    if not session_data.get('document_content'):
-        flash('No document content found. Please upload a document.', 'warning')
-        return redirect(url_for('index'))
+    topics = session_data.get('topics', {})
+    notes = session_data.get('generated_notes', {})
+    granularity = session_data.get('current_granularity', 50)
+    viewing_topic = None
     
+    current_document_id = session_data.get('document_id') # Questo dovrebbe essere l'ID intero del documento
+
+    # --- CARICA CRONOLOGIA CHAT DAL DATABASE ---
+    if current_document_id:
+        try:
+            db_chat_messages = ChatMessage.query.filter_by(document_id=current_document_id).order_by(ChatMessage.timestamp.asc()).all()
+            loaded_chat_history = []
+            for msg in db_chat_messages:
+                loaded_chat_history.append({
+                    "sender": msg.sender,
+                    "message": msg.message
+                })
+            session_data['chat_history'] = loaded_chat_history # Sovrascrivi la cronologia della sessione con quella del DB
+            logger.info(f"Caricati {len(loaded_chat_history)} messaggi chat dal DB per il documento {current_document_id}.")
+        except Exception as e:
+            logger.error(f"Errore durante il caricamento della cronologia chat dal DB per il documento {current_document_id}: {e}", exc_info=True)
+            # Mantieni la cronologia chat esistente nella sessione o inizializza a vuota
+            if 'chat_history' not in session_data:
+                 session_data['chat_history'] = []
+    elif 'chat_history' not in session_data: # Se non c'è document_id, assicurati che esista almeno una lista vuota
+        session_data['chat_history'] = []
+    # --- FINE CARICAMENTO CRONOLOGIA CHAT ---
+
+
+    if notes and not request.args.get('topic_id'):
+        first_topic_id = next(iter(notes))
+        if first_topic_id in notes: # Verifica aggiuntiva
+            viewing_topic = notes[first_topic_id]
+            viewing_topic['topic_id'] = first_topic_id
+
+    elif request.args.get('topic_id'):
+        topic_id_req = request.args.get('topic_id')
+        if topic_id_req in notes: # Verifica aggiuntiva
+            viewing_topic = notes[topic_id_req]
+            viewing_topic['topic_id'] = topic_id_req
+        elif topics and topic_id_req in topics: # Fallback se la nota non è generata ma il topic esiste
+             # Potresti voler mostrare solo le info del topic se la nota non c'è
+             pass
+
+
     return render_template(
         'results.html',
-        topics=session_data.get('topics', {}),
-        granularity=session_data.get('current_granularity', 50)
+        topics=topics,
+        granularity=granularity,
+        notes=notes,
+        session_data=session_data, # Assicurati che session_data sia passato al template
+        viewing_topic=viewing_topic,
+        # selected_format è gestito altrove o non necessario qui se non si rigenerano note
     )
 
 @app.route('/update_granularity', methods=['POST'])
@@ -549,11 +647,25 @@ def generate_notes():
 
         if not topics_dict:
             flash('Nessun argomento trovato. Per favore aggiusta la granularità e riprova.', 'warning')
-            return render_template('results.html', topics={}, granularity=session_data.get('current_granularity', 50), notes={}, selected_format=output_format)
+            return render_template(
+                'results.html',
+                topics={},
+                granularity=session_data.get('current_granularity', 50),
+                notes={},
+                selected_format=output_format,
+                session_data=session_data
+            )
 
         if not primary_document_id:
             flash('ID documento non trovato nella sessione. Impossibile procedere con la generazione delle note.', 'danger')
-            return render_template('results.html', topics=topics_dict, granularity=session_data.get('current_granularity', 50), notes={}, selected_format=output_format)
+            return render_template(
+                'results.html',
+                topics=topics_dict,
+                granularity=session_data.get('current_granularity', 50),
+                notes={},
+                selected_format=output_format,
+                session_data=session_data
+            )
         
         # Determine the path to the document's specific upload folder
         document_specific_upload_folder = None
@@ -599,8 +711,9 @@ def generate_notes():
             'results.html',
             topics=topics_dict,
             granularity=session_data.get('current_granularity', 50),
-            notes=generated_notes, # Use notes from orchestrator
-            selected_format=output_format
+            notes=generated_notes,
+            selected_format=output_format,
+            session_data=session_data
         )
 
     except Exception as e:
@@ -610,8 +723,15 @@ def generate_notes():
         # Fallback rendering
         session_id_fallback = session.get('session_id')
         if session_id_fallback and session_id_fallback in sessions_data:
-             s_data = sessions_data[session_id_fallback]
-             return render_template('results.html', topics=s_data.get('topics', {}), granularity=s_data.get('current_granularity', 50), notes=s_data.get('generated_notes', {}), selected_format=request.form.get('format', 'markdown'))
+            s_data = sessions_data[session_id_fallback]
+            return render_template(
+                'results.html',
+                topics=s_data.get('topics', {}),
+                granularity=s_data.get('current_granularity', 50),
+                notes=s_data.get('generated_notes', {}),
+                selected_format=request.form.get('format', 'markdown'),
+                session_data=s_data
+            )
         return redirect(url_for('index'))
 
 @app.route('/download/<topic_id>', methods=['GET'])
@@ -688,20 +808,23 @@ def download_all():
 
             if images_folder:
                 # --- FIX: Change "Figure" to "Figura" ---
-                image_references = re.findall(r"### Figura: (.*\.(?:png|jpg|jpeg|gif|bmp))", note_content, re.IGNORECASE)
+                image_references = re.findall(r"\b[\w\-/\\\.]+?\.(?:png|jpg|jpeg|gif|bmp)\b", note_content, re.IGNORECASE)
                 # --- End Fix ---
                 logger.debug(f"Found image references in note '{topic_data['name']}': {image_references}") # DEBUG
 
+
                 for img_filename in image_references:
-                    if img_filename not in added_images:
+                    zip_image_path = os.path.join('images', img_filename)
+                    if zip_image_path not in added_images:
+                        if img_filename.startswith('images/'):
+                            img_filename = img_filename[len('images/'):]
                         image_path = os.path.join(images_folder, img_filename)
                         logger.debug(f"Checking for image path: {image_path}") # DEBUG
                         logger.debug(f"Does image path exist? {os.path.exists(image_path)}") # DEBUG
                         if os.path.exists(image_path):
                             try:
-                                zip_image_path = os.path.join('images', img_filename)
                                 zf.write(image_path, arcname=zip_image_path)
-                                added_images.add(img_filename)
+                                added_images.add(zip_image_path)
                                 logger.info(f"Added image '{img_filename}' to zip.")
 
                                 # Update note content with relative path
@@ -760,7 +883,8 @@ def view_topic(topic_id):
         granularity=session_data.get('current_granularity', 50),
         notes=generated_notes,
         selected_format=topic_data['format'],
-        viewing_topic=topic_data
+        viewing_topic=topic_data,
+        session_data=session_data
     )
 
 @app.route('/delete_document/<int:document_id>', methods=['POST'])
@@ -804,3 +928,187 @@ if __name__ == "__main__":
     except OSError as e:
          logger.error(f"Could not create instance folder at {app.instance_path}: {e}")
     app.run(host="0.0.0.0", port=5000, debug=True)
+
+
+@app.route('/merge_topics', methods=['POST'])
+def merge_topics():
+    session_id = session.get('session_id')
+    if not session_id or session_id not in sessions_data:
+        flash('No active session found.', 'warning')
+        return redirect(url_for('results'))
+
+    selected_topic_ids = request.form.getlist('selected_topics')
+    if len(selected_topic_ids) < 2:
+        flash('Seleziona almeno due topic da unire.', 'warning')
+        return redirect(url_for('results'))
+
+    session_data = sessions_data[session_id]
+    topics_dict = session_data.get('topics', {})
+    combined_content = session_data.get('document_content', '')
+    document_id = session_data.get('document_id')
+
+    # Recupera i nomi e le descrizioni dei topic selezionati
+    merged_topic_names = [topics_dict[tid]['name'] for tid in selected_topic_ids if tid in topics_dict]
+    topic_titles = ", ".join(merged_topic_names)
+    merged_topic_title = notes_orchestrator.create_unified_title(topic_titles)
+    merged_description = "\n\n".join([topics_dict[tid]['description'] for tid in selected_topic_ids if tid in topics_dict])
+
+    # Genera un nuovo topic_id unico
+    new_topic_id = "merged_" + "_".join(selected_topic_ids)
+
+    # --- DATABASE OPERATIONS ---
+    from models import Topic, Note, db
+
+    try:
+        # 1. Crea il nuovo topic nel DB
+        new_topic = Topic(
+            topic_id=new_topic_id,
+            name=merged_topic_title,
+            description=merged_description,
+            document_id=document_id
+        )
+        db.session.add(new_topic)
+        db.session.flush()  # Per ottenere l'id del nuovo topic
+
+        # 2. Elimina i vecchi topic e le relative note
+        for tid in selected_topic_ids:
+            old_topic = Topic.query.filter_by(topic_id=tid, document_id=document_id).first()
+            if old_topic:
+                # Elimina le note associate
+                Note.query.filter_by(topic_id=old_topic.id).delete()
+                db.session.delete(old_topic)
+
+        db.session.commit()
+        logger.info(f"Creato nuovo topic unito '{merged_topic_title}' e rimossi i vecchi topic dal DB.")
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Errore durante il merge dei topic nel DB: {str(e)}")
+        flash(f"Errore durante il merge dei topic nel database: {str(e)}", "danger")
+        return redirect(url_for('results'))
+
+    # --- SESSION UPDATE ---
+    # Aggiorna il dizionario dei topics in sessione
+    topics_dict[new_topic_id] = {
+        'name': merged_topic_title,
+        'description': merged_description
+    }
+    for tid in selected_topic_ids:
+        topics_dict.pop(tid, None)
+    session_data['topics'] = topics_dict
+
+    flash(f'Creato nuovo topic unito: {merged_topic_title}', 'success')
+    return redirect(url_for('results'))
+
+@app.route('/summary_interaction', methods=['POST'])
+def summary_interaction():
+    user_instruction = request.form.get('user_instruction', '').strip()
+    document_id_str = request.form.get('document_id')
+    session_id = session.get('session_id')
+
+    if not session_id or session_id not in sessions_data:
+        # For AJAX, it's better to return an error JSON
+        return jsonify({"error": "Sessione non trovata. Riprova.", "status": "error"}), 403
+
+    session_data = sessions_data[session_id]
+    topics_dict = session_data.get('topics', {})
+    generated_notes = session_data.get('generated_notes', {})
+    document_content = session_data.get('document_content', '')
+
+    if 'chat_history' not in session_data:
+        session_data['chat_history'] = []
+    
+    # This is the history up to the point BEFORE the current user message for the AI's context
+    current_chat_history_for_orchestrator = list(session_data.get('chat_history', []))
+
+    if not document_id_str:
+        ai_error_message = "Error: Document ID is missing. Cannot process request."
+        if user_instruction:
+             session_data['chat_history'].append({"sender": "user", "message": user_instruction})
+             session_data['chat_history'].append({"sender": "ai", "message": ai_error_message})
+        return jsonify({"error": "ID Documento non trovato.", "ai_message": ai_error_message, "status": "error"}), 400
+
+    try:
+        doc_id_int = int(document_id_str)
+    except ValueError:
+        ai_error_message = "Error: Invalid Document ID."
+        if user_instruction:
+             session_data['chat_history'].append({"sender": "user", "message": user_instruction})
+             session_data['chat_history'].append({"sender": "ai", "message": ai_error_message})
+        return jsonify({"error": "ID Documento non valido.", "ai_message": ai_error_message, "status": "error"}), 400
+
+    if not user_instruction:
+        # For AJAX, we might not even hit this if client-side validation is good,
+        # but if we do, return an appropriate JSON response.
+        return jsonify({"error": "Per favore, inserisci una richiesta o una domanda.", "status": "info"}), 400
+
+    # Add user message to session_data['chat_history'] for persistence
+    # The client-side JS will add it to the view immediately.
+    session_data['chat_history'].append({"sender": "user", "message": user_instruction})
+
+    result_tuple = notes_orchestrator.apply_user_instruction(
+        user_instruction,
+        generated_notes,
+        topics_dict,
+        doc_id_int,
+        document_content,
+        current_chat_history_for_orchestrator 
+    )
+
+    updated_notes = result_tuple[0]
+    status = result_tuple[1]
+    ai_response_message = result_tuple[2] if len(result_tuple) > 2 else "An issue occurred processing your request."
+
+    session_data['generated_notes'] = updated_notes
+
+    # Add AI response to session_data['chat_history'] for persistence
+    if ai_response_message: # Ensure there's a message to add
+        session_data['chat_history'].append({"sender": "ai", "message": ai_response_message})
+
+    # --- SALVA CHAT NEL DATABASE --- (This logic remains the same)
+    try:
+        user_chat_db = ChatMessage(
+            document_id=doc_id_int,
+            sender="user",
+            message=user_instruction, 
+            timestamp=datetime.utcnow() 
+        )
+        db.session.add(user_chat_db)
+
+        if ai_response_message:
+             ai_chat_db = ChatMessage(
+                document_id=doc_id_int,
+                sender="ai",
+                message=ai_response_message, 
+                timestamp=datetime.utcnow() 
+            )
+             db.session.add(ai_chat_db)
+        
+        db.session.commit()
+        logger.info(f"Messaggi chat per il documento {doc_id_int} salvati nel DB.")
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Errore durante il salvataggio dei messaggi chat nel DB per il documento {doc_id_int}: {e}", exc_info=True)
+        # Return an error in JSON as well
+        return jsonify({
+            "user_message": user_instruction, # So client can display it if it hasn't already
+            "ai_message": "Errore durante il salvataggio della cronologia chat nel database.",
+            "status": "db_error"
+        }), 500
+    # --- FINE SALVATAGGIO CHAT NEL DATABASE ---
+
+    # Limit chat history in session
+    max_chat_history_items = 30 
+    if len(session_data['chat_history']) > max_chat_history_items:
+        session_data['chat_history'] = session_data['chat_history'][-max_chat_history_items:]
+
+    # Return JSON instead of redirecting
+    response_data = {
+        "user_message": user_instruction, # Client might use this to confirm what was processed
+        "ai_message": ai_response_message,
+        "status": status
+    }
+    # Remove flash messages for normal chat operations
+    # Flashes for critical errors can remain if they are handled outside this AJAX flow
+    # or if you want to add them to the JSON response for the client to handle.
+
+    return jsonify(response_data)
