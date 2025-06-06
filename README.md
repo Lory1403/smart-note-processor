@@ -1,6 +1,7 @@
 # 📚 AI-Powered Study Notes Generator
 
 Evaluation Sheet --> [Available here!!!](https://docs.google.com/document/d/14JwS1JXknfEl8mjqMwglI9vfPwSyUdcdf0JL0JNUiTM/edit?usp=sharing)
+In class presentation -> [Available here!!!](https://docs.google.com/presentation/d/11KQhckAdUV8zs04tMFeNIlBqmGP9yHJ_0tnnql803Mo/edit?usp=sharing)
 
 ## 📝 Overview
 This project is designed to help students and professionals studying complex topics by automatically generating structured, easy-to-navigate study notes. The system processes study materials, including images, videos, and text documents (PDF, Word), and creates well-organized Markdown files. These files are:
